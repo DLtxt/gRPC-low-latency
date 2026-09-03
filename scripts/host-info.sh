@@ -28,16 +28,20 @@ case "${OS}" in
         # implementer/part registers instead, so Graviton would record nothing at all --
         # which defeats the purpose of stamping the host. lscpu synthesizes a real name
         # on both, so prefer it and keep /proc/cpuinfo as the fallback.
+        # lscpu prints a literal "-" when the hypervisor exposes no model string,
+        # which passes an emptiness check but carries no information.
+        blank() { case "${1:-}" in ""|"-"|"unknown"|"n/a") return 0 ;; *) return 1 ;; esac; }
+
         CPU_MODEL="$(lscpu 2>/dev/null | awk -F': +' '/^Model name/{print $2; exit}')"
-        if [ -z "${CPU_MODEL}" ]; then
+        if blank "${CPU_MODEL}"; then
             CPU_MODEL="$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
         fi
-        if [ -z "${CPU_MODEL}" ]; then
+        if blank "${CPU_MODEL}"; then
             IMPL="$(awk -F': ' '/CPU implementer/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
             PART="$(awk -F': ' '/CPU part/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
             [ -n "${IMPL}" ] && CPU_MODEL="ARM implementer ${IMPL} part ${PART}"
         fi
-        CPU_MODEL="${CPU_MODEL:-unknown}"
+        blank "${CPU_MODEL}" && CPU_MODEL=unknown
         CPU_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
         CPU_THREADS="${CPU_CORES}"
         MEM_BYTES="$(( $(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0) * 1024 ))"
