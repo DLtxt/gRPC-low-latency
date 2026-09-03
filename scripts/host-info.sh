@@ -24,9 +24,20 @@ case "${OS}" in
         OS_VERSION="macOS $(sw_vers -productVersion 2>/dev/null || echo unknown)"
         ;;
     Linux)
-        CPU_MODEL="$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null \
-                    || awk -F': ' '/Model/{print $2; exit}' /proc/cpuinfo 2>/dev/null \
-                    || echo unknown)"
+        # /proc/cpuinfo carries "model name" only on x86. ARM exposes numeric
+        # implementer/part registers instead, so Graviton would record nothing at all --
+        # which defeats the purpose of stamping the host. lscpu synthesizes a real name
+        # on both, so prefer it and keep /proc/cpuinfo as the fallback.
+        CPU_MODEL="$(lscpu 2>/dev/null | awk -F': +' '/^Model name/{print $2; exit}')"
+        if [ -z "${CPU_MODEL}" ]; then
+            CPU_MODEL="$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+        fi
+        if [ -z "${CPU_MODEL}" ]; then
+            IMPL="$(awk -F': ' '/CPU implementer/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+            PART="$(awk -F': ' '/CPU part/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+            [ -n "${IMPL}" ] && CPU_MODEL="ARM implementer ${IMPL} part ${PART}"
+        fi
+        CPU_MODEL="${CPU_MODEL:-unknown}"
         CPU_CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 0)"
         CPU_THREADS="${CPU_CORES}"
         MEM_BYTES="$(( $(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0) * 1024 ))"
@@ -76,6 +87,12 @@ field ghz "$(version_of ghz --version)"
 field softhsm "$(version_of softhsm2-util --version)"
 field docker "$(version_of docker --version)"
 field git_commit "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-field git_dirty "$(git diff --quiet 2>/dev/null && echo clean || echo dirty)"
+# Distinguish "no git repository here" from "repository with uncommitted changes".
+# Reporting a source export as dirty would wrongly discredit a valid reference run.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    field git_dirty "$(git diff --quiet 2>/dev/null && echo clean || echo dirty)"
+else
+    field git_dirty "no-git"
+fi
 printf '  "timestamp_utc": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '}\n'
