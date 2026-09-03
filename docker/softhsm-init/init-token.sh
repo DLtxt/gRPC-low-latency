@@ -48,50 +48,10 @@ else
         --pin "${USER_PIN}"
 fi
 
-p11() {
-    pkcs11-tool --module "${MODULE}" --token-label "${TOKEN_LABEL}" "$@"
-}
-
 # --- 2. Demo keys --------------------------------------------------------------
-# `pkcs11-tool --list-objects` prints "  label:      <name>" for each object.
-object_exists() {
-    p11 --login --pin "${USER_PIN}" --list-objects 2>/dev/null \
-        | grep -q "label:[[:space:]]*$1\$"
-}
-
-ensure_keypair() {
-    label="$1"; key_type="$2"
-    if object_exists "${label}"; then
-        log "key '${label}' already present"
-        return 0
-    fi
-    log "generating ${key_type} key pair '${label}'"
-    p11 --login --pin "${USER_PIN}" \
-        --keypairgen --key-type "${key_type}" \
-        --label "${label}" \
-        --usage-sign
-}
-
-ensure_secret_key() {
-    label="$1"; key_type="$2"
-    if object_exists "${label}"; then
-        log "key '${label}' already present"
-        return 0
-    fi
-    log "generating ${key_type} secret key '${label}'"
-    p11 --login --pin "${USER_PIN}" \
-        --keygen --key-type "${key_type}" \
-        --label "${label}" \
-        --usage-decrypt
-}
-
-ensure_keypair    "demo-ec-p256"  "EC:prime256v1"
-ensure_keypair    "demo-rsa-2048" "rsa:2048"
-ensure_secret_key "demo-aes-256"  "aes:32"
-
-# --- 3. Report -----------------------------------------------------------------
-log "token contents:"
-p11 --login --pin "${USER_PIN}" --list-objects 2>/dev/null \
-    | sed 's/^/[softhsm-init]   /'
+# Delegated to the `provision` binary, which is the same code the native token uses.
+# It is idempotent and sets CKA_SENSITIVE / CKA_EXTRACTABLE explicitly.
+log "provisioning demo keys"
+provision 2>&1 | sed 's/^/[softhsm-init]   /'
 
 log "provisioning complete"
