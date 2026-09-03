@@ -60,11 +60,39 @@ if ! command -v ghz >/dev/null 2>&1; then
 fi
 
 # --- repo ---------------------------------------------------------------------
-if [ ! -d "${REPO_DIR}/.git" ]; then
+# The repository is private, so a bare clone from a fresh host has no credentials.
+# Three ways in, in order of preference:
+#
+#   1. The source is already at REPO_DIR (rsync'd or scp'd from a machine that has
+#      it). This is the documented path and needs no tokens on the host.
+#   2. GITHUB_TOKEN is set in the environment, so we can clone over HTTPS.
+#   3. Nothing works -- fail loudly rather than half-configuring the host.
+if [ -f "${REPO_DIR}/proxy/Cargo.toml" ]; then
+    log "using existing source at ${REPO_DIR}"
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
     log "cloning repository into ${REPO_DIR}"
-    git clone --quiet https://github.com/DLtxt/gRPC-low-latency.git "${REPO_DIR}"
+    git clone --quiet \
+        "https://x-access-token:${GITHUB_TOKEN}@github.com/DLtxt/gRPC-low-latency.git" \
+        "${REPO_DIR}"
+else
+    cat >&2 <<'MISSING'
+[bootstrap] ERROR: no source found and no GITHUB_TOKEN set.
+
+The repository is private. Either copy it to this host first:
+
+    rsync -az --exclude target --exclude .local --exclude .env \
+        ./ USER@HOST:~/gRPC-low-latency/
+
+or export GITHUB_TOKEN with repo read access before running this script.
+MISSING
+    exit 1
 fi
 cd "${REPO_DIR}"
+
+if [ ! -f proxy/Cargo.toml ] || [ ! -f proto/hsm/v1/hsm.proto ]; then
+    echo "[bootstrap] ERROR: ${REPO_DIR} does not look like this repository" >&2
+    exit 1
+fi
 
 # --- token --------------------------------------------------------------------
 # Kept inside the repo, exactly as on a development machine, so the benchmark path
