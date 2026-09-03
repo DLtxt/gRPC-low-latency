@@ -22,6 +22,10 @@ path = "src/bin/token-check.rs"
 name = "provision"
 path = "src/bin/provision.rs"
 
+[[bin]]
+name = "hsm-ceiling"
+path = "src/bin/hsm-ceiling.rs"
+
 [dependencies]
 # PKCS#11
 cryptoki = "0.12"
@@ -48,6 +52,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
+flume = "0.12.0"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
