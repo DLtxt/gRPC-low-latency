@@ -69,7 +69,9 @@ if port_in_use "${PORT}"; then
     exit 1
 fi
 
-LOG="$(mktemp -t bench-proxy)"
+# BSD mktemp accepts a bare prefix after -t; GNU requires X's in the template.
+# Spell the template out so this works on macOS and Linux alike.
+LOG="$(mktemp "${TMPDIR:-/tmp}/bench-proxy.XXXXXX")"
 PKCS11_MODULE="${PKCS11_MODULE}" \
 TOKEN_LABEL="${TOKEN_LABEL:-grpc-low-latency}" \
 USER_PIN="${USER_PIN:-1234}" \
