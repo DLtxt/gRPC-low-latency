@@ -53,10 +53,29 @@ aws ec2 run-instances --region us-east-1 \
 
 For x86, swap `arm64` for `amd64` in the SSM parameter and use `c7i.2xlarge`.
 
-Then, on the instance:
+Then copy the source across and bootstrap. The repository is **private**, so a fresh
+host has no credentials to clone with — `rsync` from a machine that already has the
+source is the path that needs no tokens on the benchmark host:
 
 ```bash
-curl -sSfL https://raw.githubusercontent.com/DLtxt/gRPC-low-latency/main/scripts/bootstrap-linux.sh | bash
+rsync -az --exclude target --exclude .local --exclude .env --exclude results/local \
+    ./ ubuntu@HOST:~/gRPC-low-latency/
+
+ssh ubuntu@HOST 'bash ~/gRPC-low-latency/scripts/bootstrap-linux.sh'
+```
+
+(If you would rather clone, export a `GITHUB_TOKEN` with repo read access on the host
+and the bootstrap will use it. Do not pipe the script from `curl` — a 404 on a private
+repo produces an empty body that `bash` runs happily and exits 0.)
+
+The bootstrap installs build tools, Rust, SoftHSM2, and `ghz`, initializes a token
+inside the working tree, builds release binaries, and provisions the demo keys. It is
+idempotent and has been verified end to end on a clean Ubuntu 24.04 image.
+
+Then run the suite:
+
+```bash
+ssh ubuntu@HOST
 cd ~/gRPC-low-latency
 export SOFTHSM2_CONF=$PWD/.local/softhsm/softhsm2.conf
 set -a; . ./.env; set +a
@@ -68,7 +87,7 @@ model, kernel, toolchain versions, git commit, and whether the tree was dirty. C
 back and commit them:
 
 ```bash
-scp -r ubuntu@HOST:~/gRPC-low-latency/results/reference/ ./results/
+rsync -az ubuntu@HOST:~/gRPC-low-latency/results/reference/ ./results/reference/
 ```
 
 **Terminate the instances afterwards.** A full pass is roughly 20–30 minutes per host,
