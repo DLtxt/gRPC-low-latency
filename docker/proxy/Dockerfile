@@ -5,9 +5,12 @@
 # It shares the token directory with softhsm-init via a named volume (plan.md 4.1).
 
 FROM rust:1-bookworm AS build
+WORKDIR /app
+COPY proto ./proto
+COPY proxy/Cargo.toml proxy/Cargo.lock ./proxy/
+COPY proxy/build.rs ./proxy/
+COPY proxy/src ./proxy/src
 WORKDIR /app/proxy
-COPY proxy/Cargo.toml proxy/Cargo.lock ./
-COPY proxy/src ./src
 RUN cargo build --release --locked --bins
 
 FROM debian:bookworm-slim
@@ -15,11 +18,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends softhsm2 \
  && rm -rf /var/lib/apt/lists/*
 
-# Run unprivileged. The token volume is chowned by the compose entrypoint ordering;
-# softhsm-init runs as root and leaves the tokens group-readable via umask 0077,
-# so the proxy runs as root for now and drops privileges once M2 fixes ownership.
+COPY --from=build /app/proxy/target/release/proxy /usr/local/bin/proxy
 COPY --from=build /app/proxy/target/release/token-check /usr/local/bin/token-check
+COPY --from=build /app/proxy/target/release/provision /usr/local/bin/provision
 
-ENV PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
+ENV PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so \
+    LISTEN_ADDR=0.0.0.0:50051 \
+    RUST_LOG=info
 
-ENTRYPOINT ["/usr/local/bin/token-check"]
+EXPOSE 50051
+ENTRYPOINT ["/usr/local/bin/proxy"]

@@ -7,6 +7,10 @@ license = "MIT"
 publish = false
 
 [[bin]]
+name = "proxy"
+path = "src/main.rs"
+
+[[bin]]
 name = "spike"
 path = "src/bin/spike.rs"
 
@@ -14,10 +18,42 @@ path = "src/bin/spike.rs"
 name = "token-check"
 path = "src/bin/token-check.rs"
 
+[[bin]]
+name = "provision"
+path = "src/bin/provision.rs"
+
 [dependencies]
+# PKCS#11
 cryptoki = "0.12"
+
+# gRPC
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-reflection = "0.14"
+prost = "0.14"
+
+# Runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+
+# Public-key encoding: PKCS#11 hands back raw EC points and RSA moduli, but callers
+# want DER SubjectPublicKeyInfo. These also provide the in-process verify path in M5.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+rsa = { version = "0.9", features = ["sha2"] }
+spki = "0.7"
 sha2 = "0.10"
+rand = "0.8"
+
+# Diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+thiserror = "2"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+# protoc is not assumed to be on PATH. Vendoring it keeps local builds, the Docker
+# build, and CI from each needing a system protobuf-compiler package.
+protoc-bin-vendored = "3"
 
 [profile.release]
 opt-level = 3

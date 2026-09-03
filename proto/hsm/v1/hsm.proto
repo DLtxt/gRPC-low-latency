@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package hsm.v1;
+
+option go_package = "github.com/DLtxt/gRPC-low-latency/gen/hsm/v1;hsmv1";
+
+// Cryptographic operations backed by a PKCS#11 token.
+//
+// Private key material never leaves the token. Sign and Decrypt therefore always
+// reach the HSM and are never served from cache. Public artifacts -- public keys and
+// certificates -- are cacheable, so Verify and GetPublicKey may be answered entirely
+// in-process once warm. See plan.md 2 and 4.4.
+service HsmService {
+  // Produce a signature. Always reaches the HSM.
+  rpc Sign(SignRequest) returns (SignResponse);
+
+  // Check a signature. Served in-process from the cached public key when warm.
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
+
+  // Encrypt with a symmetric token key. Always reaches the HSM.
+  rpc Encrypt(EncryptRequest) returns (EncryptResponse);
+
+  // Decrypt with a symmetric token key. Always reaches the HSM.
+  rpc Decrypt(DecryptRequest) returns (DecryptResponse);
+
+  // Fetch a public key as DER SubjectPublicKeyInfo. Cacheable.
+  rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse);
+}
+
+enum SignatureMechanism {
+  SIGNATURE_MECHANISM_UNSPECIFIED = 0;
+
+  // ECDSA over a SHA-256 digest (PKCS#11 CKM_ECDSA).
+  SIGNATURE_MECHANISM_ECDSA_SHA256 = 1;
+
+  // RSASSA-PKCS1-v1_5 with SHA-256 (PKCS#11 CKM_SHA256_RSA_PKCS).
+  SIGNATURE_MECHANISM_RSA_PKCS_SHA256 = 2;
+
+  // RSASSA-PSS with SHA-256 (PKCS#11 CKM_SHA256_RSA_PKCS_PSS).
+  SIGNATURE_MECHANISM_RSA_PSS_SHA256 = 3;
+}
+
+enum CipherMechanism {
+  CIPHER_MECHANISM_UNSPECIFIED = 0;
+
+  // AES-GCM (PKCS#11 CKM_AES_GCM), 96-bit IV, 128-bit tag.
+  CIPHER_MECHANISM_AES_GCM = 1;
+}
+
+// What is being signed or verified.
+//
+// Callers may send the raw message and let the proxy hash it, or pre-hash and send
+// only the digest. Pre-hashing keeps large payloads off the wire, which matters at
+// the throughputs this service targets; the digest length must match the mechanism.
+message SigningInput {
+  oneof input {
+    bytes message = 1;
+    bytes digest = 2;
+  }
+}
+
+message SignRequest {
+  string key_label = 1;
+  SignatureMechanism mechanism = 2;
+  SigningInput input = 3;
+}
+
+message SignResponse {
+  bytes signature = 1;
+  string key_label = 2;
+}
+
+message VerifyRequest {
+  string key_label = 1;
+  SignatureMechanism mechanism = 2;
+  SigningInput input = 3;
+  bytes signature = 4;
+}
+
+message VerifyResponse {
+  // False means the signature did not check out. A malformed request is an error
+  // status instead, so a client can distinguish "bad signature" from "bad request".
+  bool valid = 1;
+
+  // True when answered from the in-process public key cache without touching the HSM.
+  bool served_from_cache = 2;
+}
+
+message EncryptRequest {
+  string key_label = 1;
+  CipherMechanism mechanism = 2;
+  bytes plaintext = 3;
+  bytes associated_data = 4;
+}
+
+message EncryptResponse {
+  // Ciphertext with the GCM authentication tag appended, as PKCS#11 returns it.
+  bytes ciphertext = 1;
+
+  // Randomly generated per request; the caller must pass it back to Decrypt.
+  bytes iv = 2;
+}
+
+message DecryptRequest {
+  string key_label = 1;
+  CipherMechanism mechanism = 2;
+  bytes ciphertext = 3;
+  bytes iv = 4;
+  bytes associated_data = 5;
+}
+
+message DecryptResponse {
+  bytes plaintext = 1;
+}
+
+message GetPublicKeyRequest {
+  string key_label = 1;
+}
+
+message GetPublicKeyResponse {
+  // DER-encoded SubjectPublicKeyInfo (RFC 5280), so callers can use it directly.
+  bytes spki_der = 1;
+
+  // "EC" or "RSA".
+  string key_type = 2;
+
+  bool served_from_cache = 3;
+}

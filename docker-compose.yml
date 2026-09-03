@@ -36,7 +36,16 @@ services:
       USER_PIN: ${USER_PIN:?USER_PIN not set -- run 'make env'}
     volumes:
       - softhsm-tokens:/var/lib/softhsm/tokens
-    # M2 replaces the token-check entrypoint with the gRPC server and opens 50051.
+    ports:
+      - "${PROXY_PORT:-50051}:50051"
+    # token-check opens the token, exercises every demo key, and exits non-zero if
+    # anything is wrong -- a far more useful signal than "the port is listening".
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/token-check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
 
 volumes:
   softhsm-tokens:
