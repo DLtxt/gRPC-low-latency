@@ -1,0 +1,42 @@
+# gRPC-low-latency: SoftHSM2 token provisioning + the proxy that uses it.
+#
+# There is deliberately no "softhsm server" here. PKCS#11 is an in-process C API
+# with no network protocol, so the proxy dlopen()s libsofthsm2.so itself and shares
+# the token directory with the init container through a named volume (plan.md 4.1).
+#
+# PINs come from .env, which `make env` generates. They are not defaulted here --
+# a compose file with a working PIN baked in is exactly the mistake plan.md 9 warns
+# about for a project that is ostensibly about key protection.
+
+services:
+  # Creates the token and the demo keys, then exits. Idempotent.
+  # The ONLY process that writes the token directory; concurrent writers corrupt it.
+  softhsm-init:
+    build:
+      context: .
+      dockerfile: docker/softhsm-init/Dockerfile
+    restart: "no"
+    environment:
+      TOKEN_LABEL: ${TOKEN_LABEL:?TOKEN_LABEL not set -- run 'make env'}
+      SO_PIN: ${SO_PIN:?SO_PIN not set -- run 'make env'}
+      USER_PIN: ${USER_PIN:?USER_PIN not set -- run 'make env'}
+    volumes:
+      - softhsm-tokens:/var/lib/softhsm/tokens
+
+  proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    depends_on:
+      softhsm-init:
+        condition: service_completed_successfully
+    environment:
+      PKCS11_MODULE: /usr/lib/softhsm/libsofthsm2.so
+      TOKEN_LABEL: ${TOKEN_LABEL:?TOKEN_LABEL not set -- run 'make env'}
+      USER_PIN: ${USER_PIN:?USER_PIN not set -- run 'make env'}
+    volumes:
+      - softhsm-tokens:/var/lib/softhsm/tokens
+    # M2 replaces the token-check entrypoint with the gRPC server and opens 50051.
+
+volumes:
+  softhsm-tokens:

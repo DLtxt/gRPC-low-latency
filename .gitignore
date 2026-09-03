@@ -23,3 +23,6 @@
 
 # OS noise
 .DS_Store
+
+# Generated PINs -- never committed (plan.md section 9)
+/.env

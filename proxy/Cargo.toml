@@ -10,6 +10,10 @@ publish = false
 name = "spike"
 path = "src/bin/spike.rs"
 
+[[bin]]
+name = "token-check"
+path = "src/bin/token-check.rs"
+
 [dependencies]
 cryptoki = "0.12"
 sha2 = "0.10"

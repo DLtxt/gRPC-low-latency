@@ -9,7 +9,10 @@ USER_PIN="${USER_PIN:-1234}"
 
 mkdir -p /var/lib/softhsm/tokens
 
-if softhsm2-util --show-slots | grep -q "Label:[[:space:]]*${TOKEN_LABEL}\$"; then
+# Labels are space-padded to 32 chars, so strip trailing whitespace before matching.
+if softhsm2-util --show-slots 2>/dev/null \
+    | sed -n 's/^[[:space:]]*Label:[[:space:]]*\(.*[^[:space:]]\)[[:space:]]*$/\1/p' \
+    | grep -Fxq "${TOKEN_LABEL}"; then
     echo "token '${TOKEN_LABEL}' already initialized"
 else
     echo "initializing token '${TOKEN_LABEL}'"
