@@ -2,7 +2,8 @@
 
 A stateless gRPC cryptographic proxy in front of a PKCS#11 HSM (SoftHSM2), with mTLS
 workload authentication, a blocking-safe session worker pool, in-memory caching, and
-load-shedding. Runs entirely locally at zero cost.
+load-shedding. Development, tests, and the demo run entirely locally at zero cost; only
+the *published* reference benchmarks use paid cloud hosts (§7).
 
 **Primary language: Rust.** Go is used for the benchmark harness, the direct-PKCS#11
 baseline, and an admin CLI (details in §3).
@@ -370,12 +371,27 @@ credible project.
 
 Run everything on one machine, all containers pinned, nothing else running.
 
-**Setup**
-- Record: CPU model, physical core count, RAM, kernel, Docker version, SoftHSM2 version,
-  Rust and Go versions.
-- Pin CPUs in compose (`cpuset`) so the load generator cannot starve the proxy. Give the
-  proxy N cores and the generator its own. Note the split in the README — an unpinned
-  benchmark on a laptop is not reproducible.
+**Where benchmarks run**
+
+M0 showed this workload is CPU-bound end to end: RSA at ~820 µs and ECDSA at ~40 µs are
+pure computation, and the gRPC hop is loopback, so there is no network physics anywhere in
+the measurement. Results are therefore almost entirely a function of CPU microarchitecture,
+clock, and kernel — which is exactly what pinning an instance type controls. (`cpuset` in
+Docker Compose does *not* do this on macOS: containers run inside a Linux VM, so cpuset
+pins the VM's vCPUs, not host cores.)
+
+- **The harness is host-agnostic.** `make bench` runs on any machine — macOS included —
+  and produces complete results. This is not a second-class path: it is how you verify the
+  pipeline works before spending anything.
+- **Every result is self-stamping.** Each run records CPU model, physical core count, RAM,
+  kernel, Docker version, SoftHSM2 version, Rust and Go versions, the exact `ghz`
+  invocation, and whether the host is a reference host or a local one.
+- **Published numbers come from two pinned reference hosts**: `c7g.2xlarge` (Graviton3,
+  arm64) and `c7i.2xlarge` (Intel, x86_64). Two architectures rather than one on purpose:
+  if the worker-scaling curve has the same *shape* on both, that is evidence about the
+  design instead of about one machine. `results/REFERENCE.md` names them so anyone can
+  reproduce like-for-like.
+- Local runs are labelled `local` and are never used for README figures.
 - 30-second warm-up discarded. 5-minute measurement window. Three runs; report median and
   spread, not the best run.
 
