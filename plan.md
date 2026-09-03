@@ -36,35 +36,52 @@ baseline, and an admin CLI (details in §3).
 
 | # | Criterion |
 |---|---|
-| S1 | ECDSA P-256 sign sustained ≥ 4,000 QPS, p99 ≤ 5 ms, 0 errors, 5 min soak |
-| S2 | Cached verify sustained ≥ 8,000 QPS, p99 ≤ 2 ms, 0 errors, 5 min soak |
-| S3 | At 2× saturation, error rate is bounded and p99 of *accepted* requests stays flat |
-| S4 | Baseline harness reproduces the "naive" number on the same hardware |
-| S5 | `docker compose up` → Grafana dashboard with live data, no manual steps |
-| S6 | CI runs `cargo test`, `cargo clippy -D warnings`, `go test ./...`, and a smoke bench |
+| S1 | RSA-2048 sign throughput scales ≥ 5× from 1 worker to 8, p99 ≤ 10 ms at 80% of measured capacity, 0 errors, 5 min soak |
+| S2 | ECDSA P-256 sign through the proxy costs ≤ 500 µs p50 and ≤ 2 ms p99 over direct in-process PKCS#11 on the same host |
+| S3 | Cached verify sustained ≥ 8,000 QPS, p99 ≤ 2 ms, 0 errors, 5 min soak |
+| S4 | At 2× saturation, error rate is bounded and p99 of *accepted* requests stays flat |
+| S5 | Baseline harness reproduces the "naive" number on the same hardware |
+| S6 | `docker compose up` → Grafana dashboard with live data, no manual steps |
+| S7 | CI runs `cargo test`, `cargo clippy -D warnings`, `go test ./...`, and a smoke bench |
+
+S1 and S2 were originally stated as "≥ 4,000 QPS ECDSA sign" and "≥ 8,000 QPS cached
+verify". The M0 spike measured a *single* session at ~18,000 ECDSA signs/sec natively and
+~25,000 in Docker, which made both floors rather than targets. See `docs/m0-findings.md`.
 
 ---
 
 ## 2. Honest benchmarking policy (read this before writing the README)
 
-The headline "400 → 8,000 QPS" is achievable, but only if the comparison is stated
-precisely. Two effects are being conflated, and a reviewer who knows this domain will
-notice immediately.
+An earlier draft of this plan promised a headline of "400 → 8,000 QPS". The M0 spike
+measured the token directly and that number does not survive: a single session on a single
+thread signs ~18,000 ECDSA/sec natively and ~25,000/sec in Docker, and even the deliberately
+naive pattern (`C_FindObjects` on every request) manages ~8,900/sec. The claimed "before"
+figure was off by roughly 20×. Numbers below are measured, not assumed.
 
-- **Pooling and concurrency** is a real, defensible speedup. A single-session,
-  single-threaded PKCS#11 client serializes on one session; a pool of N sessions on N
-  threads scales close to linearly until SoftHSM2's CPU cost per operation dominates.
+The speedup story therefore splits by algorithm, because the two behave completely
+differently:
+
+- **RSA-2048 is HSM-bound.** At ~1,200 signs/sec per session the token really is the
+  constraint, so a pool of N sessions on N threads scales close to linearly. This is the
+  headline pooling workload and the honest home for a before/after chart.
+- **ECDSA P-256 is not HSM-bound.** At 40–55 µs per signature, eight workers have a ceiling
+  near 150,000 signs/sec — far more than gRPC, TLS, and the Tokio runtime can feed on this
+  hardware. For ECDSA the proxy *is* the bottleneck, so the honest metric is **overhead**:
+  what does the proxy cost, in microseconds, over calling PKCS#11 directly, in exchange for
+  mTLS, per-key authorization, caching, and load-shedding? Reporting a speedup here would
+  be measuring the load generator.
 - **Caching public keys** converts `Verify` from an HSM round trip into an in-process
-  `ring`/`rustls` verification. That is a genuine architectural win, but it is not the HSM
-  going faster — it is the HSM being removed from the path.
+  verification. That is a genuine architectural win, but it is not the HSM going faster —
+  it is the HSM being removed from the path.
 
-**Therefore the README reports three workloads separately, never a single blended number:**
+**Therefore the README reports four workloads separately, never a single blended number:**
 
-| Workload | HSM in path? | What it demonstrates |
-|---|---|---|
-| `sign` (ECDSA P-256) | Yes, every request | Worker pool throughput and queueing |
-| `verify` (cached pubkey) | No, after first fetch | Cache effectiveness |
-| `mixed` 70/30 verify/sign | Partially | Realistic service profile |
+| Workload | HSM in path? | Metric that matters | What it demonstrates |
+|---|---|---|---|
+| `sign-rsa` (RSA-2048) | Yes, every request | Throughput vs. worker count | Worker pool scaling — **the headline** |
+| `sign-ecdsa` (P-256) | Yes, every request | Added latency vs. direct PKCS#11 | Proxy overhead is small |
+| `verify` (cached pubkey) | No, after first fetch | Throughput | Cache effectiveness |
+| `mixed` 70/30 verify/sign | Partially | Throughput and p99 | Realistic service profile |
 
 A blended number may appear *in addition*, labeled as such. Private key material is never
 cached — it never leaves the token, and `Sign` always hits the HSM. State this in the
@@ -72,13 +89,16 @@ README; it is the single most important credibility sentence in the whole repo.
 
 **Benchmark table template** (fill after §7; delete placeholder rows):
 
-| Metric | Direct PKCS#11 (1 session, serial) | Proxy — sign | Proxy — verify (cached) |
-|---|---|---|---|
-| Throughput | _TBD_ QPS | _TBD_ QPS | _TBD_ QPS |
-| p50 latency | _TBD_ | _TBD_ | _TBD_ |
-| p99 latency | _TBD_ | _TBD_ | _TBD_ |
-| Concurrency model | Single session, blocking | N-session pool + async gRPC | Pool + in-process verify |
-| Error rate at 1× | _TBD_ | _TBD_ | _TBD_ |
+| Metric | Direct PKCS#11 (1 session, serial) | Proxy — RSA-2048 sign | Proxy — ECDSA sign | Proxy — verify (cached) |
+|---|---|---|---|---|
+| Throughput | 1,195 /s native, 1,221 /s Docker (RSA) | _TBD_ QPS | _TBD_ QPS | _TBD_ QPS |
+| p50 latency | 836 µs native (RSA) | _TBD_ | _TBD_ | _TBD_ |
+| p99 latency | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| Concurrency model | Single session, blocking | N-session pool + async gRPC | N-session pool + async gRPC | Pool + in-process verify |
+| Error rate at 1× | _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+
+Direct-PKCS#11 figures come from the M0 spike (`docs/m0-findings.md`); the ECDSA column is
+reported as *overhead over direct*, not as a speedup.
 
 Record hardware, kernel, Docker version, CPU count, SoftHSM2 version, and the exact `ghz`
 invocation alongside every table. Benchmarks without a methodology section are noise.
@@ -309,9 +329,10 @@ and correct. This is your first honest datapoint.
 ### M3 — Worker pool (~2 days)
 Replace the mutex with the N-thread/N-session pool, bounded channel, per-worker handle
 cache, health checks, graceful shutdown.
-- **Exit:** throughput scales with N on `ghz`; publish a QPS-vs-workers curve. That curve
-  is one of the best figures in the repo — it shows where SoftHSM2's own CPU cost takes
-  over.
+- **Exit:** RSA-2048 throughput scales with N on `ghz`; publish a QPS-vs-workers curve.
+  That curve is one of the best figures in the repo — it shows where SoftHSM2's own CPU
+  cost takes over. Use RSA, not ECDSA: M0 showed ECDSA is not HSM-bound, so an ECDSA curve
+  would flatten against the gRPC layer and measure the wrong thing (see §2).
 
 ### M4 — mTLS + authorization (~1.5 days)
 `gen-certs.sh`, tonic TLS config, identity extraction, policy file, denied-workload demo.
@@ -362,10 +383,10 @@ Run everything on one machine, all containers pinned, nothing else running.
 
 | Name | Driver | Description |
 |---|---|---|
-| `baseline-serial` | Go `baseline/` | 1 session, 1 goroutine, sequential ECDSA sign |
+| `baseline-serial` | Go `baseline/` | 1 session, 1 goroutine, sequential sign — both RSA-2048 and ECDSA |
 | `baseline-naive-concurrent` | Go `baseline/` | 50 goroutines sharing 1 mutexed session |
-| `proxy-sign` | `ghz` | ECDSA P-256 sign, concurrency sweep 1→512 |
-| `proxy-sign-rsa` | `ghz` | RSA-2048 sign (expect much lower — report it anyway) |
+| `proxy-sign-rsa` | `ghz` | RSA-2048 sign, **worker-count sweep 1→16** — the headline scaling curve |
+| `proxy-sign-ecdsa` | `ghz` | ECDSA P-256 sign, concurrency sweep 1→512; reported as overhead over direct |
 | `proxy-verify-warm` | `ghz` | Cached public key verify |
 | `proxy-verify-cold` | `bench/` | Cache-cold ramp, shows single-flight working |
 | `proxy-mixed` | `bench/` | 70/30 verify/sign |
