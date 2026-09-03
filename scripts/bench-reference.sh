@@ -9,6 +9,16 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPS="${REPS:-3}"
 export REPS
 
+# hsm-ceiling talks to the token directly, so it needs the module path resolved the
+# same way the sweep resolves it -- the built-in default is Debian's and is wrong on
+# Amazon Linux, which uses lib64.
+. ./scripts/lib-common.sh
+PKCS11_MODULE="$(find_pkcs11_module)"
+export PKCS11_MODULE
+
+HOST_KIND="$(./scripts/host-info.sh | awk -F'"' '/host_kind/{print $4}')"
+mkdir -p "results/${HOST_KIND}"
+
 run() {
     echo
     echo "############ $1 ############"
@@ -38,7 +48,8 @@ run "RSA-2048 - worker pool" \
 # limits are never confused for one another.
 echo
 echo "############ token ceiling (no gRPC) ############"
-./proxy/target/release/hsm-ceiling | tee "results/$(./scripts/host-info.sh | awk -F'"' '/host_kind/{print $4}')/ceiling-$(date -u +%Y%m%dT%H%M%SZ).txt"
+./proxy/target/release/hsm-ceiling \
+    | tee "results/${HOST_KIND}/ceiling-$(date -u +%Y%m%dT%H%M%SZ).txt"
 
 echo
 echo "reference suite complete. Results in results/"
