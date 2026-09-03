@@ -15,8 +15,8 @@
 *.crt
 *.p12
 
-# Benchmark output
-/results/
+# Benchmark output: local runs are noise, reference runs are the published record
+/results/local/
 
 # SoftHSM token state
 /tokens/

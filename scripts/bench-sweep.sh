@@ -29,13 +29,43 @@ REPS="${REPS:-3}"
 PORT="${PORT:-50051}"
 CONNECTIONS="${CONNECTIONS:-8}"
 
-PKCS11_MODULE="${PKCS11_MODULE:-/opt/homebrew/lib/softhsm/libsofthsm2.so}"
+# Find libsofthsm2 without assuming a platform. Homebrew keeps the .so name on macOS;
+# Debian and Amazon Linux differ in directory and lib vs lib64.
+find_pkcs11_module() {
+    [ -n "${PKCS11_MODULE:-}" ] && { printf '%s' "${PKCS11_MODULE}"; return; }
+    for candidate in \
+        /opt/homebrew/lib/softhsm/libsofthsm2.so \
+        /usr/local/lib/softhsm/libsofthsm2.so \
+        /usr/lib/softhsm/libsofthsm2.so \
+        /usr/lib64/softhsm/libsofthsm2.so \
+        /usr/lib/*/softhsm/libsofthsm2.so
+    do
+        [ -f "${candidate}" ] && { printf '%s' "${candidate}"; return; }
+    done
+    echo "ERROR: could not locate libsofthsm2.so; set PKCS11_MODULE" >&2
+    exit 1
+}
+PKCS11_MODULE="$(find_pkcs11_module)"
 export SOFTHSM2_CONF="${SOFTHSM2_CONF:-${REPO}/.local/softhsm/softhsm2.conf}"
 
-if lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+# lsof is not installed on minimal cloud images, so fall back through ss and finally
+# a bare TCP connect. The check itself is not optional: benchmarking a stale process
+# that happens to hold the port silently produces numbers for the wrong binary, which
+# has already happened once on this project.
+port_in_use() {
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+    elif command -v ss >/dev/null 2>&1; then
+        ss -ltnH "sport = :$1" 2>/dev/null | grep -q .
+    else
+        (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3<&- 3>&-; return 0; }
+        return 1
+    fi
+}
+
+if port_in_use "${PORT}"; then
     echo "ERROR: something is already listening on port ${PORT}." >&2
     echo "       Refusing to benchmark a server this script did not start." >&2
-    lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >&2
     exit 1
 fi
 
@@ -58,12 +88,21 @@ cleanup() {
 trap cleanup EXIT
 
 for _ in $(seq 1 50); do
-    lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1 && break
+    port_in_use "${PORT}" && break
     kill -0 "${PROXY_PID}" 2>/dev/null || { echo "proxy died on startup:"; cat "${LOG}"; exit 1; }
     sleep 0.2
 done
 
+HOST_JSON="$(./scripts/host-info.sh)"
+HOST_KIND="$(printf '%s' "${HOST_JSON}" | awk -F'"' '/host_kind/{print $4}')"
+INSTANCE="$(printf '%s' "${HOST_JSON}" | awk -F'"' '/instance_type/{print $4}')"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+RESULT_DIR="results/${HOST_KIND}"
+RESULT_FILE="${RESULT_DIR}/${STAMP}-${MODE}-w${WORKERS}-${KEY}.json"
+mkdir -p "${RESULT_DIR}"
+
 echo "mode=${MODE} workers=${WORKERS} queue_depth=${QUEUE_DEPTH} key=${KEY}"
+echo "host: ${HOST_KIND}${INSTANCE:+ (${INSTANCE})}"
 echo "budget: p99 < ${BUDGET_MS} ms   (median of ${REPS} runs per cell)"
 # Errors are shown, not just tested. A shed request is answered fast, so a run that
 # rejects most of its load reports a *higher* QPS than one that serves it -- an error
@@ -78,6 +117,7 @@ spread() { printf '%s\n' "$@" | sort -g | awk '{v[NR]=$1} END{printf "%s-%s", v[
 PAYLOAD="$(printf 'benchmark payload' | base64)"
 BEST_QPS=0
 BEST_CONC=0
+ROWS=""
 
 for CONC in ${CONCURRENCIES}; do
     # ghz refuses --connections greater than --concurrency.
@@ -125,11 +165,45 @@ for CONC in ${CONCURRENCIES}; do
 
     printf '%-6s %-12s %-11s %-11s %-11s %-13s %-9s %-8s\n' \
         "${CONC}" "${QPS}" "${P50}ms" "${P95}ms" "${P99}ms" "${P99_SPREAD}" "${ERRORS}" "${WITHIN}"
+
+    ROWS="${ROWS}${ROWS:+,}
+    {\"concurrency\": ${CONC}, \"qps\": ${QPS}, \"p50_ms\": ${P50}, \"p95_ms\": ${P95},
+     \"p99_ms\": ${P99}, \"p99_spread_ms\": \"${P99_SPREAD}\", \"errors\": ${ERRORS},
+     \"within_budget\": ${WITHIN/yes/true}}"
 done
+
+ROWS="${ROWS//no\}/false\}}"
+
+cat > "${RESULT_FILE}" <<JSON
+{
+  "host": ${HOST_JSON},
+  "run": {
+    "mode": "${MODE}",
+    "workers": ${WORKERS},
+    "queue_depth": ${QUEUE_DEPTH},
+    "key_label": "${KEY}",
+    "mechanism": "${MECHANISM}",
+    "requests_per_cell": ${REQUESTS},
+    "repetitions_per_cell": ${REPS},
+    "budget_p99_ms": ${BUDGET_MS},
+    "ghz_command": "ghz --insecure --proto proto/hsm/v1/hsm.proto --import-paths proto --call hsm.v1.HsmService/Sign -c <conc> -n ${REQUESTS} --connections <min(${CONNECTIONS},conc)> 127.0.0.1:${PORT}"
+  },
+  "rows": [${ROWS}
+  ],
+  "result": {
+    "max_qps_within_budget": ${BEST_QPS},
+    "at_concurrency": ${BEST_CONC}
+  }
+}
+JSON
 
 echo
 if [ "${BEST_CONC}" -eq 0 ]; then
     echo "RESULT: never met p99 < ${BUDGET_MS} ms at any tested concurrency."
 else
     echo "RESULT: ${BEST_QPS} QPS sustained with p99 < ${BUDGET_MS} ms (at concurrency ${BEST_CONC})"
+fi
+echo "saved:  ${RESULT_FILE}"
+if [ "${HOST_KIND}" != "reference" ]; then
+    echo "NOTE:   local host -- not eligible for published figures (see results/REFERENCE.md)"
 fi
