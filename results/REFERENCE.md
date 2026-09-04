@@ -35,6 +35,10 @@ carry across without re-deriving the knee.
 
 ## Reproducing a reference run
 
+Step-by-step commands, including instance launch and teardown, are in
+[`docs/running-reference-benchmarks.md`](../docs/running-reference-benchmarks.md).
+The short version:
+
 Launch either instance with Ubuntu 24.04. AMI IDs are region-specific and change, so
 resolve the current one rather than hardcoding it:
 
