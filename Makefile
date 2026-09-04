@@ -14,7 +14,10 @@ help: ## Show this help
 env: ## Generate .env with random PINs (idempotent)
 	@./scripts/gen-env.sh
 
-up: env ## Provision the token and run the proxy container
+certs: ## Generate the local CA, server cert, and per-workload client certs
+	@./scripts/gen-certs.sh
+
+up: env certs ## Provision the token and run the proxy container
 	$(COMPOSE) up --build
 
 down: ## Stop containers, keep the token volume
@@ -29,8 +32,11 @@ logs: ## Tail proxy logs
 check: env ## M1 exit check: can the proxy open the shared token read/write?
 	$(COMPOSE) run --rm --build proxy
 
-bench: ## Sweep concurrency and report max QPS under the p99 budget
+bench: ## Sweep concurrency and report max QPS under the p99 budget (plaintext)
 	./scripts/bench-sweep.sh
+
+bench-tls: certs ## Same sweep with mTLS enabled, to price the security layer
+	TLS=on ./scripts/bench-sweep.sh
 
 bench-baseline: ## Same sweep against the M2 single-session baseline
 	MODE=single ./scripts/bench-sweep.sh

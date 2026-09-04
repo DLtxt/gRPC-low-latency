@@ -31,7 +31,7 @@ path = "src/bin/hsm-ceiling.rs"
 cryptoki = "0.12"
 
 # gRPC
-tonic = "0.14"
+tonic = { version = "0.14", features = ["tls-ring"] }
 tonic-prost = "0.14"
 tonic-reflection = "0.14"
 prost = "0.14"
@@ -53,6 +53,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 flume = "0.12.0"
+x509-parser = "0.18"
+toml = "0.9"
+serde = { version = "1", features = ["derive"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

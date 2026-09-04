@@ -9,6 +9,7 @@ use std::sync::Arc;
 use rand::RngCore;
 use tonic::{Request, Response, Status};
 
+use crate::authz::{Authorizer, Operation};
 use crate::crypto::{self, SigningInput};
 use crate::pkcs11::{JobRequest, JobResponse, Pool, PoolError};
 use crate::proto::v1::{
@@ -22,11 +23,28 @@ const GCM_IV_LEN: usize = 12;
 
 pub struct PooledService {
     pool: Arc<Pool>,
+    /// `None` when TLS is disabled. Without mTLS there is no client certificate, so
+    /// there is no identity to authorize -- the server logs a prominent warning at
+    /// startup rather than pretending to enforce a policy it cannot evaluate.
+    authorizer: Option<Arc<Authorizer>>,
 }
 
 impl PooledService {
-    pub fn new(pool: Arc<Pool>) -> Self {
-        Self { pool }
+    pub fn new(pool: Arc<Pool>, authorizer: Option<Arc<Authorizer>>) -> Self {
+        Self { pool, authorizer }
+    }
+
+    /// Authorize, or pass through when running without mTLS.
+    fn check<T>(
+        &self,
+        request: &Request<T>,
+        key_label: &str,
+        operation: Operation,
+    ) -> Result<(), Status> {
+        match &self.authorizer {
+            Some(authorizer) => authorizer.authorize(request, key_label, operation).map(|_| ()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -86,6 +104,7 @@ fn unexpected(response: JobResponse) -> Status {
 #[tonic::async_trait]
 impl HsmService for PooledService {
     async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
+        self.check(&request, &request.get_ref().key_label, Operation::Sign)?;
         let request = request.into_inner();
         let input = extract_input(request.input)?;
         let prepared = crypto::prepare(request.mechanism, input)
@@ -114,6 +133,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<VerifyRequest>,
     ) -> Result<Response<VerifyResponse>, Status> {
+        self.check(&request, &request.get_ref().key_label, Operation::Verify)?;
         let request = request.into_inner();
         let input = extract_input(request.input)?;
         let prepared = crypto::prepare(request.mechanism, input)
@@ -144,6 +164,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<EncryptRequest>,
     ) -> Result<Response<EncryptResponse>, Status> {
+        self.check(&request, &request.get_ref().key_label, Operation::Encrypt)?;
         let request = request.into_inner();
         require_aes_gcm(request.mechanism)?;
 
@@ -175,6 +196,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<DecryptRequest>,
     ) -> Result<Response<DecryptResponse>, Status> {
+        self.check(&request, &request.get_ref().key_label, Operation::Decrypt)?;
         let request = request.into_inner();
         require_aes_gcm(request.mechanism)?;
 
@@ -206,6 +228,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<GetPublicKeyRequest>,
     ) -> Result<Response<GetPublicKeyResponse>, Status> {
+        self.check(&request, &request.get_ref().key_label, Operation::GetPublicKey)?;
         let request = request.into_inner();
 
         let response = self

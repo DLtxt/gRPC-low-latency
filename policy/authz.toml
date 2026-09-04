@@ -1,0 +1,36 @@
+# Authorization policy: which workload may perform which operation on which key.
+#
+# Default is deny. An identity absent from this file is granted nothing, and an
+# identity present here is granted only what is listed -- there are no wildcards, on
+# purpose. A wildcard in an authorization policy is a footgun: it silently widens as
+# new keys are added, which is exactly when you would want it to stay narrow.
+#
+# Identities are the URI SAN of the client certificate, in SPIFFE form. They are
+# issued by scripts/gen-certs.sh.
+
+[[workloads]]
+identity = "spiffe://local/ns/default/sa/payments"
+description = "Payment service. Signs with both key pairs and uses the AES key."
+grants = [
+    { key_label = "demo-ec-p256",  operations = ["sign", "verify", "get_public_key"] },
+    { key_label = "demo-rsa-2048", operations = ["sign", "verify", "get_public_key"] },
+    { key_label = "demo-aes-256",  operations = ["encrypt", "decrypt"] },
+]
+
+[[workloads]]
+identity = "spiffe://local/ns/default/sa/reporting"
+description = "Reporting service. Read-only: verifies signatures, never produces them."
+grants = [
+    { key_label = "demo-ec-p256",  operations = ["verify", "get_public_key"] },
+    { key_label = "demo-rsa-2048", operations = ["verify", "get_public_key"] },
+]
+
+# Deliberately under-privileged. Batch may sign with the EC key but NOT with
+# demo-rsa-2048, which is what the M4 demo exercises: a real denial, with the metric
+# incrementing, rather than a description of one.
+[[workloads]]
+identity = "spiffe://local/ns/default/sa/batch"
+description = "Batch jobs. EC signing only; no access to the RSA key or the AES key."
+grants = [
+    { key_label = "demo-ec-p256", operations = ["sign", "verify", "get_public_key"] },
+]

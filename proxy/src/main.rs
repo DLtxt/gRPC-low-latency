@@ -12,11 +12,12 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use grpc_low_latency_proxy::authz::{Authorizer, Policy};
 use grpc_low_latency_proxy::grpc::{PooledService, SingleSessionService};
 use grpc_low_latency_proxy::pkcs11::{Pool, PoolConfig, TokenConfig};
 use grpc_low_latency_proxy::proto::v1::hsm_service_server::HsmServiceServer;
 use grpc_low_latency_proxy::proto::v1::FILE_DESCRIPTOR_SET;
-use tonic::transport::Server;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,6 +28,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:50051".to_string())
         .parse()
         .context("LISTEN_ADDR is not a valid socket address")?;
+
+    // mTLS and the policy travel together: without a client certificate there is no
+    // identity, and without an identity the policy cannot be evaluated. Enabling one
+    // without the other would be security theatre, so they are configured as a unit.
+    let security = load_security()?;
 
     let reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
@@ -48,17 +54,28 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow::anyhow!("failed to start worker pool: {e}"))?,
             );
 
-            let service = PooledService::new(Arc::clone(&pool));
-            tracing::info!(%listen_addr, "gRPC server listening");
+            let authorizer = security.as_ref().map(|s| Arc::clone(&s.authorizer));
+            let service = PooledService::new(Arc::clone(&pool), authorizer);
+            tracing::info!(%listen_addr, tls = security.is_some(), "gRPC server listening");
 
-            Server::builder()
+            server_builder(&security)?
                 .add_service(HsmServiceServer::new(service))
                 .add_service(reflection)
                 .serve_with_shutdown(listen_addr, shutdown_signal())
                 .await
                 .context("gRPC server failed")?;
 
-            report_pool_metrics(&pool);
+                    report_pool_metrics(&pool);
+            if let Some(security) = &security {
+                let m = security.authorizer.metrics();
+                tracing::info!(
+                    allowed = m.allowed_total.load(std::sync::atomic::Ordering::Relaxed),
+                    denied = m.denied_total.load(std::sync::atomic::Ordering::Relaxed),
+                    unauthenticated =
+                        m.unauthenticated_total.load(std::sync::atomic::Ordering::Relaxed),
+                    "authorization metrics"
+                );
+            }
 
             // Drain in-flight work before the module is finalized.
             match Arc::try_unwrap(pool) {
@@ -69,9 +86,9 @@ async fn main() -> Result<()> {
 
         "single" => {
             let service = SingleSessionService::connect(&token)?;
-            tracing::info!(%listen_addr, "gRPC server listening (M2 baseline)");
+            tracing::info!(%listen_addr, tls = security.is_some(), "gRPC server listening (M2 baseline)");
 
-            Server::builder()
+            server_builder(&security)?
                 .add_service(HsmServiceServer::new(service))
                 .add_service(reflection)
                 .serve_with_shutdown(listen_addr, shutdown_signal())
@@ -105,6 +122,77 @@ fn report_pool_metrics(pool: &Pool) {
         mean_service_us = m.mean_service_micros(),
         "pool metrics"
     );
+}
+
+/// TLS material plus the policy compiled from it.
+struct Security {
+    tls: ServerTlsConfig,
+    authorizer: Arc<Authorizer>,
+}
+
+/// A server builder with TLS applied when configured.
+fn server_builder(security: &Option<Security>) -> Result<Server> {
+    match security {
+        Some(security) => Server::builder()
+            .tls_config(security.tls.clone())
+            .context("failed to apply TLS configuration"),
+        None => Ok(Server::builder()),
+    }
+}
+
+/// Load certificates and the authorization policy.
+///
+/// Defaults to requiring mTLS. Running without it is possible -- the benchmark A/B needs
+/// a plaintext baseline to measure TLS cost against -- but it must be asked for
+/// explicitly and it announces itself loudly, because a server that silently accepts
+/// anonymous callers is the failure this whole milestone exists to prevent.
+fn load_security() -> Result<Option<Security>> {
+    let enabled = std::env::var("PROXY_TLS").unwrap_or_else(|_| "on".to_string());
+    if enabled == "off" {
+        tracing::warn!(
+            "PROXY_TLS=off: serving PLAINTEXT with NO client authentication and NO \
+             authorization policy. Every caller is anonymous and every key is reachable. \
+             This is for benchmarking only."
+        );
+        return Ok(None);
+    }
+
+    let cert_dir = std::env::var("CERT_DIR").unwrap_or_else(|_| "certs".to_string());
+    let policy_path =
+        std::env::var("AUTHZ_POLICY").unwrap_or_else(|_| "policy/authz.toml".to_string());
+
+    let read = |name: &str| -> Result<Vec<u8>> {
+        let path = std::path::Path::new(&cert_dir).join(name);
+        std::fs::read(&path).with_context(|| {
+            format!(
+                "failed to read {}; run scripts/gen-certs.sh, or set PROXY_TLS=off",
+                path.display()
+            )
+        })
+    };
+
+    let identity = Identity::from_pem(read("server.crt")?, read("server.key")?);
+    let client_ca = Certificate::from_pem(read("ca.crt")?);
+
+    // client_ca_root is what turns TLS into *mutual* TLS: without it the server proves
+    // its own identity and accepts anyone. Rejection happens during the handshake, so an
+    // unauthenticated caller never reaches a handler.
+    let tls = ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(client_ca);
+
+    let policy = Policy::load(&policy_path)?;
+    tracing::info!(
+        policy = %policy_path,
+        identities = policy.identity_count(),
+        grants = policy.grant_count(),
+        "mTLS enabled; authorization policy loaded"
+    );
+
+    Ok(Some(Security {
+        tls,
+        authorizer: Arc::new(Authorizer::new(policy)),
+    }))
 }
 
 fn init_tracing() {

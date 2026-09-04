@@ -28,6 +28,10 @@ BUDGET_MS="${BUDGET_MS:-2.0}"
 REPS="${REPS:-3}"
 PORT="${PORT:-50051}"
 CONNECTIONS="${CONNECTIONS:-8}"
+# TLS is part of the measurement, not a detail: mTLS lands in the hot path, so its cost
+# comes out of the same 2 ms budget as everything else.
+TLS="${TLS:-off}"
+CLIENT_IDENTITY="${CLIENT_IDENTITY:-payments}"
 
 . ./scripts/lib-common.sh
 PKCS11_MODULE="$(find_pkcs11_module)"
@@ -47,6 +51,7 @@ TOKEN_LABEL="${TOKEN_LABEL:-grpc-low-latency}" \
 USER_PIN="${USER_PIN:-1234}" \
 LISTEN_ADDR="0.0.0.0:${PORT}" \
 PROXY_MODE="${MODE}" \
+PROXY_TLS="${TLS}" \
 HSM_WORKERS="${WORKERS}" \
 HSM_QUEUE_DEPTH="${QUEUE_DEPTH}" \
 RUST_LOG="${RUST_LOG:-info}" \
@@ -70,10 +75,10 @@ HOST_KIND="$(printf '%s' "${HOST_JSON}" | awk -F'"' '/host_kind/{print $4}')"
 INSTANCE="$(printf '%s' "${HOST_JSON}" | awk -F'"' '/instance_type/{print $4}')"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULT_DIR="results/${HOST_KIND}"
-RESULT_FILE="${RESULT_DIR}/${STAMP}-${MODE}-w${WORKERS}-${KEY}.json"
+RESULT_FILE="${RESULT_DIR}/${STAMP}-${MODE}-w${WORKERS}-tls${TLS}-${KEY}.json"
 mkdir -p "${RESULT_DIR}"
 
-echo "mode=${MODE} workers=${WORKERS} queue_depth=${QUEUE_DEPTH} key=${KEY}"
+echo "mode=${MODE} workers=${WORKERS} queue_depth=${QUEUE_DEPTH} key=${KEY} tls=${TLS}"
 echo "host: ${HOST_KIND}${INSTANCE:+ (${INSTANCE})}"
 echo "budget: p99 < ${BUDGET_MS} ms   (median of ${REPS} runs per cell)"
 # Errors are shown, not just tested. A shed request is answered fast, so a run that
@@ -82,6 +87,15 @@ echo "budget: p99 < ${BUDGET_MS} ms   (median of ${REPS} runs per cell)"
 printf '%-6s %-12s %-11s %-11s %-11s %-13s %-9s %-8s\n' \
     conc QPS p50 p95 "p99(med)" "p99 min-max" errors within
 printf '%.0s-' {1..90}; echo
+
+if [ "${TLS}" = "on" ]; then
+    GHZ_TRANSPORT=(--cacert certs/ca.crt
+                   --cert "certs/${CLIENT_IDENTITY}.crt"
+                   --key "certs/${CLIENT_IDENTITY}.key"
+                   --cname localhost)
+else
+    GHZ_TRANSPORT=(--insecure)
+fi
 
 median() { printf '%s\n' "$@" | sort -g | awk '{v[NR]=$1} END{print v[int((NR+1)/2)]}'; }
 spread() { printf '%s\n' "$@" | sort -g | awk '{v[NR]=$1} END{printf "%s-%s", v[1], v[NR]}'; }
@@ -98,7 +112,7 @@ for CONC in ${CONCURRENCIES}; do
     QPS_SAMPLES=(); P50_SAMPLES=(); P95_SAMPLES=(); P99_SAMPLES=(); ERR_TOTAL=0
 
   for _rep in $(seq 1 "${REPS}"); do
-    OUT="$(ghz --insecure \
+    OUT="$(ghz "${GHZ_TRANSPORT[@]}" \
         --proto proto/hsm/v1/hsm.proto --import-paths proto \
         --call hsm.v1.HsmService/Sign \
         -d "{\"key_label\":\"${KEY}\",\"mechanism\":\"${MECHANISM}\",\"input\":{\"message\":\"${PAYLOAD}\"}}" \
@@ -151,6 +165,7 @@ cat > "${RESULT_FILE}" <<JSON
   "host": ${HOST_JSON},
   "run": {
     "mode": "${MODE}",
+    "tls": "${TLS}",
     "workers": ${WORKERS},
     "queue_depth": ${QUEUE_DEPTH},
     "key_label": "${KEY}",

@@ -5,6 +5,7 @@
 //! process's address space via `cryptoki`. See `plan.md` 4.1 for why that rules out
 //! the obvious "connect to the HSM container" design.
 
+pub mod authz;
 pub mod crypto;
 pub mod grpc;
 pub mod pkcs11;
