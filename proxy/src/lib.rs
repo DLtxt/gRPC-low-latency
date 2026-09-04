@@ -6,6 +6,7 @@
 //! the obvious "connect to the HSM container" design.
 
 pub mod authz;
+pub mod cache;
 pub mod crypto;
 pub mod grpc;
 pub mod pkcs11;

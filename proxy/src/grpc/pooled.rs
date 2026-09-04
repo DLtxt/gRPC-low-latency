@@ -10,6 +10,7 @@ use rand::RngCore;
 use tonic::{Request, Response, Status};
 
 use crate::authz::{Authorizer, Operation};
+use crate::cache::{CachedPublicKey, Lookup, PublicKeyCache};
 use crate::crypto::{self, SigningInput};
 use crate::pkcs11::{JobRequest, JobResponse, Pool, PoolError};
 use crate::proto::v1::{
@@ -27,11 +28,52 @@ pub struct PooledService {
     /// there is no identity to authorize -- the server logs a prominent warning at
     /// startup rather than pretending to enforce a policy it cannot evaluate.
     authorizer: Option<Arc<Authorizer>>,
+    /// Public keys only. Nothing derived from a private key is ever stored here.
+    cache: Arc<PublicKeyCache>,
 }
 
 impl PooledService {
-    pub fn new(pool: Arc<Pool>, authorizer: Option<Arc<Authorizer>>) -> Self {
-        Self { pool, authorizer }
+    pub fn new(
+        pool: Arc<Pool>,
+        authorizer: Option<Arc<Authorizer>>,
+        cache: Arc<PublicKeyCache>,
+    ) -> Self {
+        Self {
+            pool,
+            authorizer,
+            cache,
+        }
+    }
+
+    /// Resolve a public key, reaching the token only on a miss.
+    ///
+    /// A missing key is cached as a negative result rather than propagated as an error,
+    /// so a client looping on a bad label cannot turn every request into a token lookup.
+    async fn public_key(&self, key_label: &str) -> Result<(Lookup, bool), Status> {
+        let pool = Arc::clone(&self.pool);
+        let label = key_label.to_string();
+
+        self.cache
+            .get_or_load(key_label, || async move {
+                match pool
+                    .submit(JobRequest::GetPublicKey { key_label: label })
+                    .await
+                {
+                    Ok(JobResponse::PublicKey { spki_der, key_type }) => {
+                        Ok(Lookup::Found(CachedPublicKey {
+                            spki_der: Arc::new(spki_der),
+                            key_type: key_type.into(),
+                        }))
+                    }
+                    Ok(_) => Err(PoolError::Internal(
+                        "worker returned the wrong response variant".to_string(),
+                    )),
+                    Err(PoolError::KeyNotFound(_)) => Ok(Lookup::NotFound),
+                    Err(other) => Err(other),
+                }
+            })
+            .await
+            .map_err(|e| to_status(PoolError::Internal(e.to_string())))
     }
 
     /// Authorize, or pass through when running without mTLS.
@@ -96,6 +138,10 @@ fn require_aes_gcm(mechanism: i32) -> Result<(), Status> {
     }
 }
 
+fn key_not_found(label: &str) -> Status {
+    Status::not_found(format!("no key labelled '{label}' on the token"))
+}
+
 fn unexpected(response: JobResponse) -> Status {
     tracing::error!(?response, "worker returned the wrong response variant");
     Status::internal("internal error")
@@ -136,28 +182,29 @@ impl HsmService for PooledService {
         self.check(&request, &request.get_ref().key_label, Operation::Verify)?;
         let request = request.into_inner();
         let input = extract_input(request.input)?;
-        let prepared = crypto::prepare(request.mechanism, input)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let response = self
-            .pool
-            .submit(JobRequest::Verify {
-                key_label: request.key_label,
-                algorithm: prepared.algorithm,
-                payload: prepared.payload,
-                signature: request.signature,
-            })
-            .await
-            .map_err(to_status)?;
+        let (lookup, served_from_cache) = self.public_key(&request.key_label).await?;
+        let Lookup::Found(key) = lookup else {
+            return Err(key_not_found(&request.key_label));
+        };
 
-        match response {
-            JobResponse::Verified(valid) => Ok(Response::new(VerifyResponse {
-                valid,
-                // M5 adds the public key cache; until then every verify reaches the token.
-                served_from_cache: false,
-            })),
-            other => Err(unexpected(other)),
-        }
+        // Verification needs only the public key, so once it is cached the token is not
+        // in this path at all -- that is the whole point of M5.
+        let valid = crypto::verify_public(
+            &key.spki_der,
+            request.mechanism,
+            &input,
+            &request.signature,
+        )
+        .map_err(|e| {
+            tracing::error!(error = %e, "in-process verification failed");
+            Status::internal("verification failed")
+        })?;
+
+        Ok(Response::new(VerifyResponse {
+            valid,
+            served_from_cache,
+        }))
     }
 
     async fn encrypt(
@@ -231,23 +278,15 @@ impl HsmService for PooledService {
         self.check(&request, &request.get_ref().key_label, Operation::GetPublicKey)?;
         let request = request.into_inner();
 
-        let response = self
-            .pool
-            .submit(JobRequest::GetPublicKey {
-                key_label: request.key_label,
-            })
-            .await
-            .map_err(to_status)?;
+        let (lookup, served_from_cache) = self.public_key(&request.key_label).await?;
+        let Lookup::Found(key) = lookup else {
+            return Err(key_not_found(&request.key_label));
+        };
 
-        match response {
-            JobResponse::PublicKey { spki_der, key_type } => {
-                Ok(Response::new(GetPublicKeyResponse {
-                    spki_der,
-                    key_type,
-                    served_from_cache: false,
-                }))
-            }
-            other => Err(unexpected(other)),
-        }
+        Ok(Response::new(GetPublicKeyResponse {
+            spki_der: key.spki_der.as_ref().clone(),
+            key_type: key.key_type.to_string(),
+            served_from_cache,
+        }))
     }
 }

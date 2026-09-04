@@ -32,6 +32,9 @@ CONNECTIONS="${CONNECTIONS:-8}"
 # comes out of the same 2 ms budget as everything else.
 TLS="${TLS:-off}"
 CLIENT_IDENTITY="${CLIENT_IDENTITY:-payments}"
+# Which RPC to drive. Defaults to Sign; CALL and DATA let the same harness measure
+# Verify, whose whole point after M5 is that it never reaches the token.
+CALL="${CALL:-hsm.v1.HsmService/Sign}"
 
 . ./scripts/lib-common.sh
 PKCS11_MODULE="$(find_pkcs11_module)"
@@ -75,10 +78,10 @@ HOST_KIND="$(printf '%s' "${HOST_JSON}" | awk -F'"' '/host_kind/{print $4}')"
 INSTANCE="$(printf '%s' "${HOST_JSON}" | awk -F'"' '/instance_type/{print $4}')"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULT_DIR="results/${HOST_KIND}"
-RESULT_FILE="${RESULT_DIR}/${STAMP}-${MODE}-w${WORKERS}-tls${TLS}-${KEY}.json"
+RESULT_FILE="${RESULT_DIR}/${STAMP}-${MODE}-w${WORKERS}-tls${TLS}-${CALL##*/}-${KEY}.json"
 mkdir -p "${RESULT_DIR}"
 
-echo "mode=${MODE} workers=${WORKERS} queue_depth=${QUEUE_DEPTH} key=${KEY} tls=${TLS}"
+echo "mode=${MODE} workers=${WORKERS} queue_depth=${QUEUE_DEPTH} key=${KEY} tls=${TLS} call=${CALL##*/}"
 echo "host: ${HOST_KIND}${INSTANCE:+ (${INSTANCE})}"
 echo "budget: p99 < ${BUDGET_MS} ms   (median of ${REPS} runs per cell)"
 # Errors are shown, not just tested. A shed request is answered fast, so a run that
@@ -101,6 +104,11 @@ median() { printf '%s\n' "$@" | sort -g | awk '{v[NR]=$1} END{print v[int((NR+1)
 spread() { printf '%s\n' "$@" | sort -g | awk '{v[NR]=$1} END{printf "%s-%s", v[1], v[NR]}'; }
 
 PAYLOAD="$(printf 'benchmark payload' | base64)"
+# Built with an explicit conditional rather than ${DATA:-...}: the default is JSON,
+# and the first closing brace inside it would terminate the parameter expansion.
+if [ -z "${DATA:-}" ]; then
+    DATA="{\"key_label\":\"${KEY}\",\"mechanism\":\"${MECHANISM}\",\"input\":{\"message\":\"${PAYLOAD}\"}}"
+fi
 BEST_QPS=0
 BEST_CONC=0
 ROWS=""
@@ -114,8 +122,7 @@ for CONC in ${CONCURRENCIES}; do
   for _rep in $(seq 1 "${REPS}"); do
     OUT="$(ghz "${GHZ_TRANSPORT[@]}" \
         --proto proto/hsm/v1/hsm.proto --import-paths proto \
-        --call hsm.v1.HsmService/Sign \
-        -d "{\"key_label\":\"${KEY}\",\"mechanism\":\"${MECHANISM}\",\"input\":{\"message\":\"${PAYLOAD}\"}}" \
+        --call "${CALL}" -d "${DATA}" \
         -c "${CONC}" -n "${REQUESTS}" --connections "${CONNS}" \
         "127.0.0.1:${PORT}" 2>&1)"
 
@@ -168,6 +175,7 @@ cat > "${RESULT_FILE}" <<JSON
     "tls": "${TLS}",
     "workers": ${WORKERS},
     "queue_depth": ${QUEUE_DEPTH},
+    "call": "${CALL}",
     "key_label": "${KEY}",
     "mechanism": "${MECHANISM}",
     "requests_per_cell": ${REQUESTS},

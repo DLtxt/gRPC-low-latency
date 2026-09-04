@@ -174,6 +174,18 @@ pub fn public_key_to_spki_der(
     }
 }
 
+/// Pull the uncompressed SEC1 point out of a DER SubjectPublicKeyInfo.
+///
+/// `ring` takes a raw point rather than SPKI, so the cached DER has to be unwrapped.
+pub fn sec1_point_from_spki(spki_der: &[u8]) -> Result<Vec<u8>> {
+    use p256::pkcs8::DecodePublicKey;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let key = p256::PublicKey::from_public_key_der(spki_der)
+        .context("not a valid P-256 SPKI")?;
+    Ok(key.to_encoded_point(false).as_bytes().to_vec())
+}
+
 fn ec_spki(session: &Session, public_key: ObjectHandle) -> Result<Vec<u8>> {
     use p256::pkcs8::EncodePublicKey;
 
@@ -261,4 +273,137 @@ fn unwrap_der_octet_string(bytes: &[u8]) -> Result<&[u8]> {
     bytes
         .get(offset..offset + len)
         .ok_or_else(|| anyhow!("CKA_EC_POINT declares {len} bytes but the value is truncated"))
+}
+
+// --- in-process verification --------------------------------------------------------
+//
+// Verification needs only the public key, so once that key is cached there is no reason
+// to cross into the token at all. This is the M5 win: not the HSM going faster, but the
+// HSM leaving the path (plan.md 2).
+
+impl PreparedOperation {
+    /// The bare SHA-256 digest this operation is over.
+    ///
+    /// `prepare` shapes the payload for whichever PKCS#11 mechanism it selected -- a raw
+    /// digest, a full message, or a DigestInfo wrapper -- so recovering the digest means
+    /// undoing exactly that choice.
+    pub fn verification_digest(&self) -> Result<Vec<u8>> {
+        Ok(match self.algorithm {
+            // Already a digest.
+            SignAlgorithm::Ecdsa | SignAlgorithm::RsaPkcsPss => self.payload.clone(),
+
+            // The token was going to hash it; do that here instead.
+            SignAlgorithm::Sha256RsaPkcs | SignAlgorithm::Sha256RsaPkcsPss => {
+                Sha256::digest(&self.payload).to_vec()
+            }
+
+            // A DigestInfo wrapper we built ourselves; strip it back off.
+            SignAlgorithm::RsaPkcs => {
+                let prefix = SHA256_DIGEST_INFO_PREFIX;
+                if self.payload.len() != prefix.len() + SHA256_LEN
+                    || !self.payload.starts_with(prefix)
+                {
+                    bail!("payload is not a SHA-256 DigestInfo");
+                }
+                self.payload[prefix.len()..].to_vec()
+            }
+        })
+    }
+}
+
+/// Verify a signature in this process against a DER SubjectPublicKeyInfo.
+///
+/// Returns `Ok(false)` for a signature that simply does not check out, and `Err` only
+/// when the request itself is malformed -- a caller must be able to tell "your signature
+/// is wrong" from "your request is wrong".
+///
+/// ECDSA goes through `ring`, which carries P-256 assembly. Measured single-threaded on
+/// an Apple M2: ring 80 us, the token's OpenSSL 142 us, RustCrypto's portable `p256`
+/// 327 us. Choosing the portable implementation here made `Verify` slower than leaving
+/// the work on the HSM, which defeated the entire point of caching the key.
+pub fn verify_public(
+    spki_der: &[u8],
+    mechanism: i32,
+    input: &SigningInput,
+    signature: &[u8],
+) -> Result<bool> {
+    use crate::proto::v1::SignatureMechanism;
+
+    let mechanism = SignatureMechanism::try_from(mechanism)
+        .map_err(|_| anyhow!("unknown signature mechanism"))?;
+
+    match (mechanism, input) {
+        (SignatureMechanism::Unspecified, _) => bail!("signature mechanism must be specified"),
+
+        // ring hashes the message itself, which is the fast path.
+        (SignatureMechanism::EcdsaSha256, SigningInput::Message(message)) => {
+            verify_ecdsa_ring(spki_der, message, signature)
+        }
+
+        // ring exposes no prehash entry point for ECDSA, so a caller that pre-hashed
+        // pays for the portable implementation. Sending the message is faster here;
+        // pre-hashing is the right trade only when the payload is large enough that
+        // keeping it off the wire outweighs the slower verification.
+        (SignatureMechanism::EcdsaSha256, SigningInput::Digest(digest)) => {
+            check_digest_len(digest)?;
+            verify_ecdsa_prehash(spki_der, digest, signature)
+        }
+
+        // RSA verification is a public-exponent operation and already cheap.
+        (SignatureMechanism::RsaPkcsSha256, input) => {
+            verify_rsa(spki_der, &digest_of(input)?, signature, false)
+        }
+        (SignatureMechanism::RsaPssSha256, input) => {
+            verify_rsa(spki_der, &digest_of(input)?, signature, true)
+        }
+    }
+}
+
+fn digest_of(input: &SigningInput) -> Result<Vec<u8>> {
+    Ok(match input {
+        SigningInput::Message(message) => Sha256::digest(message).to_vec(),
+        SigningInput::Digest(digest) => {
+            check_digest_len(digest)?;
+            digest.clone()
+        }
+    })
+}
+
+fn verify_ecdsa_ring(spki_der: &[u8], message: &[u8], signature: &[u8]) -> Result<bool> {
+    let point = sec1_point_from_spki(spki_der)?;
+    let key =
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, &point);
+    Ok(key.verify(message, signature).is_ok())
+}
+
+fn verify_ecdsa_prehash(spki_der: &[u8], digest: &[u8], signature: &[u8]) -> Result<bool> {
+    use p256::ecdsa::signature::hazmat::PrehashVerifier;
+    use p256::pkcs8::DecodePublicKey;
+
+    let key = p256::ecdsa::VerifyingKey::from_public_key_der(spki_der)
+        .context("cached public key is not a valid P-256 SPKI")?;
+
+    // PKCS#11 emits raw r||s, not the DER encoding many libraries default to.
+    let Ok(signature) = p256::ecdsa::Signature::from_slice(signature) else {
+        return Ok(false);
+    };
+
+    Ok(key.verify_prehash(digest, &signature).is_ok())
+}
+
+fn verify_rsa(spki_der: &[u8], digest: &[u8], signature: &[u8], pss: bool) -> Result<bool> {
+    use rsa::pkcs8::DecodePublicKey;
+
+    let key = rsa::RsaPublicKey::from_public_key_der(spki_der)
+        .context("cached public key is not a valid RSA SPKI")?;
+
+    let outcome = if pss {
+        // Salt length must match what the token used when signing; `prepare` requests a
+        // salt equal to the hash length, and `Pss::new` defaults to the same.
+        key.verify(rsa::pss::Pss::new::<Sha256>(), digest, signature)
+    } else {
+        key.verify(rsa::Pkcs1v15Sign::new::<Sha256>(), digest, signature)
+    };
+
+    Ok(outcome.is_ok())
 }

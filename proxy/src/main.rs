@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use grpc_low_latency_proxy::authz::{Authorizer, Policy};
+use grpc_low_latency_proxy::cache::{CacheConfig, PublicKeyCache};
 use grpc_low_latency_proxy::grpc::{PooledService, SingleSessionService};
 use grpc_low_latency_proxy::pkcs11::{Pool, PoolConfig, TokenConfig};
 use grpc_low_latency_proxy::proto::v1::hsm_service_server::HsmServiceServer;
@@ -55,7 +56,16 @@ async fn main() -> Result<()> {
             );
 
             let authorizer = security.as_ref().map(|s| Arc::clone(&s.authorizer));
-            let service = PooledService::new(Arc::clone(&pool), authorizer);
+            let cache_config = CacheConfig::from_env();
+            tracing::info!(
+                ttl_secs = cache_config.ttl.as_secs(),
+                negative_ttl_secs = cache_config.negative_ttl.as_secs(),
+                max_entries = cache_config.max_entries,
+                "public key cache enabled"
+            );
+            let cache = Arc::new(PublicKeyCache::new(cache_config));
+
+            let service = PooledService::new(Arc::clone(&pool), authorizer, Arc::clone(&cache));
             tracing::info!(%listen_addr, tls = security.is_some(), "gRPC server listening");
 
             server_builder(&security)?
@@ -66,6 +76,17 @@ async fn main() -> Result<()> {
                 .context("gRPC server failed")?;
 
                     report_pool_metrics(&pool);
+            {
+                let m = cache.metrics();
+                tracing::info!(
+                    hits = m.hits.load(std::sync::atomic::Ordering::Relaxed),
+                    misses = m.misses.load(std::sync::atomic::Ordering::Relaxed),
+                    negative_hits = m.negative_hits.load(std::sync::atomic::Ordering::Relaxed),
+                    hit_ratio = format!("{:.4}", m.hit_ratio()),
+                    entries = cache.entry_count(),
+                    "public key cache metrics"
+                );
+            }
             if let Some(security) = &security {
                 let m = security.authorizer.metrics();
                 tracing::info!(
