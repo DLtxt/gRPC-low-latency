@@ -88,7 +88,10 @@ pub fn login_session(pkcs11: &Pkcs11, slot: Slot, config: &TokenConfig) -> Resul
         .context("C_OpenSession(CKF_RW_SESSION) failed")?;
 
     session
-        .login(UserType::User, Some(&AuthPin::new(config.user_pin.clone().into())))
+        .login(
+            UserType::User,
+            Some(&AuthPin::new(config.user_pin.clone().into())),
+        )
         .context("C_Login(CKU_USER) failed -- wrong USER_PIN?")?;
 
     Ok(session)

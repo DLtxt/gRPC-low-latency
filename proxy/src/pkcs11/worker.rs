@@ -108,6 +108,7 @@ impl Worker {
         while let Ok(job) = rx.recv() {
             let queue_wait = job.enqueued_at.elapsed();
             let started = Instant::now();
+            let operation_label = job.request.operation();
 
             let result = self.execute(job.request);
 
@@ -117,6 +118,19 @@ impl Worker {
                 queue_wait.as_nanos() as u64,
             );
             PoolMetrics::add(&self.metrics.service_nanos_total, service.as_nanos() as u64);
+
+            // Also as Prometheus histograms. The atomic totals above give means; the
+            // histograms give the tail, and the tail is the whole question here.
+            // Recorded from the worker thread rather than the handler because only the
+            // worker can separate queue wait from HSM service time -- from outside,
+            // the two are one number.
+            metrics::histogram!(crate::telemetry::metrics::QUEUE_WAIT)
+                .record(queue_wait.as_secs_f64());
+            metrics::histogram!(
+                crate::telemetry::metrics::HSM_SERVICE,
+                "operation" => operation_label
+            )
+            .record(service.as_secs_f64());
             match &result {
                 Ok(_) => PoolMetrics::incr(&self.metrics.jobs_completed),
                 Err(_) => {

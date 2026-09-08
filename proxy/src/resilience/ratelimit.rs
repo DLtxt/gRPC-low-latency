@@ -69,9 +69,7 @@ impl RateLimiter {
         let burst = NonZeroU32::new(config.burst.max(1)).expect("non-zero");
 
         Self {
-            buckets: Cache::builder()
-                .max_capacity(config.max_identities)
-                .build(),
+            buckets: Cache::builder().max_capacity(config.max_identities).build(),
             quota: Quota::per_second(per_second).allow_burst(burst),
             allowed: AtomicU64::new(0),
             rejected: AtomicU64::new(0),

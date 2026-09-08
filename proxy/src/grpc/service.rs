@@ -21,9 +21,9 @@ use tonic::{Request, Response, Status};
 use crate::crypto::{self, SigningInput};
 use crate::pkcs11::{find_object, open_token, TokenConfig};
 use crate::proto::v1::{
-    hsm_service_server::HsmService, signing_input, CipherMechanism, DecryptRequest, DecryptResponse,
-    EncryptRequest, EncryptResponse, GetPublicKeyRequest, GetPublicKeyResponse, SignRequest,
-    SignResponse, VerifyRequest, VerifyResponse,
+    hsm_service_server::HsmService, signing_input, CipherMechanism, DecryptRequest,
+    DecryptResponse, EncryptRequest, EncryptResponse, GetPublicKeyRequest, GetPublicKeyResponse,
+    SignRequest, SignResponse, VerifyRequest, VerifyResponse,
 };
 
 /// AES-GCM parameters. 96-bit IVs are the standard choice and the fast path in most
@@ -111,7 +111,11 @@ impl HsmService for SingleSessionService {
         let private_key = require_object(&session, ObjectClass::PRIVATE_KEY, &request.key_label)?;
 
         let signature = session
-            .sign(&prepared.algorithm.mechanism(), private_key, &prepared.payload)
+            .sign(
+                &prepared.algorithm.mechanism(),
+                private_key,
+                &prepared.payload,
+            )
             .map_err(|e| hsm_failure("C_Sign", e))?;
 
         Ok(Response::new(SignResponse {
@@ -171,13 +175,12 @@ impl HsmService for SingleSessionService {
         let key = require_object(&session, ObjectClass::SECRET_KEY, &request.key_label)?;
 
         let mut iv_for_params = iv.clone();
-        let params =
-            cryptoki::mechanism::aead::GcmParams::new(
-                &mut iv_for_params,
-                &request.associated_data,
-                GCM_TAG_BITS.into(),
-            )
-            .map_err(invalid_argument)?;
+        let params = cryptoki::mechanism::aead::GcmParams::new(
+            &mut iv_for_params,
+            &request.associated_data,
+            GCM_TAG_BITS.into(),
+        )
+        .map_err(invalid_argument)?;
 
         let ciphertext = session
             .encrypt(&Mechanism::AesGcm(params), key, &request.plaintext)

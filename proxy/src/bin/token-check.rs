@@ -70,7 +70,10 @@ fn main() -> Result<()> {
         println!("\ntoken-check passed: proxy can open the shared token read/write.");
         Ok(())
     } else {
-        Err(anyhow!("token-check failed:\n  - {}", failures.join("\n  - ")))
+        Err(anyhow!(
+            "token-check failed:\n  - {}",
+            failures.join("\n  - ")
+        ))
     }
 }
 

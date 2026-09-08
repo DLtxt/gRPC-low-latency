@@ -56,10 +56,7 @@ impl Authorizer {
                 .fetch_add(1, Ordering::Relaxed);
         })?;
 
-        if self
-            .policy
-            .is_allowed(&identity, key_label, operation)
-        {
+        if self.policy.is_allowed(&identity, key_label, operation) {
             self.metrics.allowed_total.fetch_add(1, Ordering::Relaxed);
             return Ok(identity);
         }

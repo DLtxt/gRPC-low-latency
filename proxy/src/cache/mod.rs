@@ -70,7 +70,11 @@ impl CacheConfig {
     pub fn from_env() -> Self {
         let defaults = Self::default();
         let secs = |key: &str| -> Option<Duration> {
-            std::env::var(key).ok()?.parse().ok().map(Duration::from_secs)
+            std::env::var(key)
+                .ok()?
+                .parse()
+                .ok()
+                .map(Duration::from_secs)
         };
         Self {
             ttl: secs("CACHE_TTL_SECS").unwrap_or(defaults.ttl),

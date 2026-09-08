@@ -1,0 +1,19 @@
+# Scrape config for the proxy.
+#
+# 1s is far more frequent than the Prometheus default of 15s, and deliberate: a
+# benchmark run lasts seconds, so a 15s interval would produce two or three points and
+# no visible shape. The series count here is tiny, so the cost is negligible.
+global:
+  scrape_interval: 1s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: hsm-proxy
+    static_configs:
+      - targets: ['proxy:9090']
+        labels:
+          service: grpc-low-latency
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

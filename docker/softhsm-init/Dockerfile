@@ -15,14 +15,18 @@ COPY proxy/Cargo.toml proxy/Cargo.lock ./proxy/
 COPY proxy/build.rs ./proxy/
 COPY proxy/src ./proxy/src
 WORKDIR /app/proxy
-RUN cargo build --release --locked --bin provision
+ENV CARGO_BUILD_JOBS=4
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/proxy/target,sharing=locked \
+    cargo build --release --locked --bin provision \
+ && mkdir -p /out && cp target/release/provision /out/
 
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends softhsm2 \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /app/proxy/target/release/provision /usr/local/bin/provision
+COPY --from=build /out/provision /usr/local/bin/provision
 COPY docker/softhsm-init/init-token.sh /usr/local/bin/init-token.sh
 RUN chmod +x /usr/local/bin/init-token.sh
 

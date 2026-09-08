@@ -97,15 +97,17 @@ impl Pool {
 
             let handle = std::thread::Builder::new()
                 .name(format!("hsm-worker-{id}"))
-                .spawn(move || match Worker::new(id, pkcs11, slot, token, metrics) {
-                    Ok(worker) => {
-                        let _ = ready_tx.send(Ok(()));
-                        worker.run(rx);
-                    }
-                    Err(e) => {
-                        let _ = ready_tx.send(Err(e));
-                    }
-                })
+                .spawn(
+                    move || match Worker::new(id, pkcs11, slot, token, metrics) {
+                        Ok(worker) => {
+                            let _ = ready_tx.send(Ok(()));
+                            worker.run(rx);
+                        }
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e));
+                        }
+                    },
+                )
                 .map_err(|e| PoolError::Internal(format!("failed to spawn worker: {e}")))?;
 
             workers.push(handle);

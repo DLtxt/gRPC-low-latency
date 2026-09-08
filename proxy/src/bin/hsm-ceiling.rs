@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::ObjectClass;
-use grpc_low_latency_proxy::pkcs11::{find_object, load_module, session::login_session, TokenConfig};
+use grpc_low_latency_proxy::pkcs11::{
+    find_object, load_module, session::login_session, TokenConfig,
+};
 use sha2::{Digest, Sha256};
 
 /// `SIGNATURE_MECHANISM_ECDSA_SHA256` from the proto, as an i32.
@@ -42,7 +44,10 @@ fn main() -> Result<()> {
 
     println!("token ceiling: raw PKCS#11, no gRPC, {duration:?} per point\n");
 
-    for (label, mechanism_name) in [("demo-ec-p256", "ECDSA P-256"), ("demo-rsa-2048", "RSA-2048")] {
+    for (label, mechanism_name) in [
+        ("demo-ec-p256", "ECDSA P-256"),
+        ("demo-rsa-2048", "RSA-2048"),
+    ] {
         println!("-- {mechanism_name} ({label}) --");
         println!(
             "{:<9} {:<14} {:<14} {:<10}",
@@ -124,9 +129,24 @@ fn verify_cost(
     let sign = start.elapsed();
 
     println!("-- ECDSA P-256 single-threaded cost, no gRPC --");
-    println!("{:<28} {:>10}", "sign (token)", format!("{:.1} us", sign.as_micros() as f64 / iterations as f64));
-    println!("{:<28} {:>10}", "verify (token, OpenSSL)", format!("{:.1} us", token.as_micros() as f64 / iterations as f64));
-    println!("{:<28} {:>10}", "verify (in-process, p256)", format!("{:.1} us", in_process.as_micros() as f64 / iterations as f64));
+    println!(
+        "{:<28} {:>10}",
+        "sign (token)",
+        format!("{:.1} us", sign.as_micros() as f64 / iterations as f64)
+    );
+    println!(
+        "{:<28} {:>10}",
+        "verify (token, OpenSSL)",
+        format!("{:.1} us", token.as_micros() as f64 / iterations as f64)
+    );
+    println!(
+        "{:<28} {:>10}",
+        "verify (in-process, p256)",
+        format!(
+            "{:.1} us",
+            in_process.as_micros() as f64 / iterations as f64
+        )
+    );
 
     // ring is what plan.md 2 actually specified for the in-process path. It carries
     // assembly for P-256; the RustCrypto implementation is portable Rust.
@@ -152,7 +172,10 @@ fn verify_cost(
         println!(
             "{:<28} {:>10}",
             "verify (in-process, ring)",
-            format!("{:.1} us", ring_elapsed.as_micros() as f64 / iterations as f64)
+            format!(
+                "{:.1} us",
+                ring_elapsed.as_micros() as f64 / iterations as f64
+            )
         );
     }
     println!();

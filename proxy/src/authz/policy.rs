@@ -160,7 +160,11 @@ grants = [
     #[test]
     fn denies_unknown_identity() {
         let policy = Policy::parse(SAMPLE).unwrap();
-        assert!(!policy.is_allowed("spiffe://local/ns/default/sa/nobody", "demo-ec-p256", Operation::Sign));
+        assert!(!policy.is_allowed(
+            "spiffe://local/ns/default/sa/nobody",
+            "demo-ec-p256",
+            Operation::Sign
+        ));
     }
 
     /// An empty policy must deny everything rather than fail open.

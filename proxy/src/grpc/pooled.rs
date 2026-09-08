@@ -13,12 +13,13 @@ use crate::authz::{Authorizer, Operation};
 use crate::cache::{CachedPublicKey, Lookup, PublicKeyCache};
 use crate::crypto::{self, SigningInput};
 use crate::pkcs11::{JobRequest, JobResponse, Pool, PoolError};
-use crate::resilience::{CircuitBreaker, RateLimiter};
 use crate::proto::v1::{
-    hsm_service_server::HsmService, signing_input, CipherMechanism, DecryptRequest, DecryptResponse,
-    EncryptRequest, EncryptResponse, GetPublicKeyRequest, GetPublicKeyResponse, SignRequest,
-    SignResponse, VerifyRequest, VerifyResponse,
+    hsm_service_server::HsmService, signing_input, CipherMechanism, DecryptRequest,
+    DecryptResponse, EncryptRequest, EncryptResponse, GetPublicKeyRequest, GetPublicKeyResponse,
+    SignRequest, SignResponse, VerifyRequest, VerifyResponse,
 };
+use crate::resilience::{CircuitBreaker, RateLimiter};
+use crate::telemetry::metrics as m;
 
 /// 96-bit IV: the standard GCM size and the fast path in most implementations.
 const GCM_IV_LEN: usize = 12;
@@ -95,6 +96,42 @@ impl PooledService {
         Ok(())
     }
 
+    /// Record a completed request: its latency, and its result by operation.
+    ///
+    /// Labelled by operation and gRPC status code rather than by key label or identity.
+    /// Those are caller-controlled, and an unbounded label set is how a metrics endpoint
+    /// turns into an out-of-memory incident.
+    fn record<T>(
+        &self,
+        operation: &'static str,
+        started: std::time::Instant,
+        result: &Result<T, Status>,
+    ) {
+        let code = match result {
+            Ok(_) => "ok",
+            Err(status) => status.code().description(),
+        };
+        metrics::counter!(m::REQUESTS_TOTAL, "operation" => operation, "result" => code)
+            .increment(1);
+        metrics::histogram!(m::REQUEST_DURATION, "operation" => operation)
+            .record(started.elapsed().as_secs_f64());
+
+        if let Err(status) = result {
+            match status.code() {
+                tonic::Code::ResourceExhausted => {
+                    metrics::counter!(m::RATE_LIMITED, "operation" => operation).increment(1)
+                }
+                tonic::Code::PermissionDenied => {
+                    metrics::counter!(m::AUTHZ_DENIED, "operation" => operation).increment(1)
+                }
+                tonic::Code::Unauthenticated => metrics::counter!(m::UNAUTHENTICATED).increment(1),
+                _ => {}
+            }
+        } else {
+            metrics::counter!(m::AUTHZ_ALLOWED, "operation" => operation).increment(1);
+        }
+    }
+
     /// Report an outcome to the breaker.
     ///
     /// Only failures that indicate the *token* is unhealthy count. A bad key label or a
@@ -149,7 +186,6 @@ impl PooledService {
         self.observe(&outcome);
         outcome
     }
-
 }
 
 /// Map pool failures onto gRPC statuses.
@@ -209,9 +245,11 @@ fn unexpected(response: JobResponse) -> Status {
     Status::internal("internal error")
 }
 
-#[tonic::async_trait]
-impl HsmService for PooledService {
-    async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
+impl PooledService {
+    async fn sign_inner(
+        &self,
+        request: Request<SignRequest>,
+    ) -> Result<Response<SignResponse>, Status> {
         self.admit(&request, &request.get_ref().key_label, Operation::Sign)?;
         let request = request.into_inner();
         let input = extract_input(request.input)?;
@@ -239,7 +277,7 @@ impl HsmService for PooledService {
         }
     }
 
-    async fn verify(
+    async fn verify_inner(
         &self,
         request: Request<VerifyRequest>,
     ) -> Result<Response<VerifyResponse>, Status> {
@@ -254,16 +292,12 @@ impl HsmService for PooledService {
 
         // Verification needs only the public key, so once it is cached the token is not
         // in this path at all -- that is the whole point of M5.
-        let valid = crypto::verify_public(
-            &key.spki_der,
-            request.mechanism,
-            &input,
-            &request.signature,
-        )
-        .map_err(|e| {
-            tracing::error!(error = %e, "in-process verification failed");
-            Status::internal("verification failed")
-        })?;
+        let valid =
+            crypto::verify_public(&key.spki_der, request.mechanism, &input, &request.signature)
+                .map_err(|e| {
+                    tracing::error!(error = %e, "in-process verification failed");
+                    Status::internal("verification failed")
+                })?;
 
         Ok(Response::new(VerifyResponse {
             valid,
@@ -271,7 +305,7 @@ impl HsmService for PooledService {
         }))
     }
 
-    async fn encrypt(
+    async fn encrypt_inner(
         &self,
         request: Request<EncryptRequest>,
     ) -> Result<Response<EncryptResponse>, Status> {
@@ -305,7 +339,7 @@ impl HsmService for PooledService {
         }
     }
 
-    async fn decrypt(
+    async fn decrypt_inner(
         &self,
         request: Request<DecryptRequest>,
     ) -> Result<Response<DecryptResponse>, Status> {
@@ -339,11 +373,15 @@ impl HsmService for PooledService {
         }
     }
 
-    async fn get_public_key(
+    async fn get_public_key_inner(
         &self,
         request: Request<GetPublicKeyRequest>,
     ) -> Result<Response<GetPublicKeyResponse>, Status> {
-        self.admit(&request, &request.get_ref().key_label, Operation::GetPublicKey)?;
+        self.admit(
+            &request,
+            &request.get_ref().key_label,
+            Operation::GetPublicKey,
+        )?;
         let request = request.into_inner();
 
         let (lookup, served_from_cache) = self.public_key(&request.key_label).await?;
@@ -356,5 +394,55 @@ impl HsmService for PooledService {
             key_type: key.key_type.to_string(),
             served_from_cache,
         }))
+    }
+}
+
+#[tonic::async_trait]
+impl HsmService for PooledService {
+    async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.sign_inner(request).await;
+        self.record("sign", started, &result);
+        result
+    }
+
+    async fn verify(
+        &self,
+        request: Request<VerifyRequest>,
+    ) -> Result<Response<VerifyResponse>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.verify_inner(request).await;
+        self.record("verify", started, &result);
+        result
+    }
+
+    async fn encrypt(
+        &self,
+        request: Request<EncryptRequest>,
+    ) -> Result<Response<EncryptResponse>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.encrypt_inner(request).await;
+        self.record("encrypt", started, &result);
+        result
+    }
+
+    async fn decrypt(
+        &self,
+        request: Request<DecryptRequest>,
+    ) -> Result<Response<DecryptResponse>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.decrypt_inner(request).await;
+        self.record("decrypt", started, &result);
+        result
+    }
+
+    async fn get_public_key(
+        &self,
+        request: Request<GetPublicKeyRequest>,
+    ) -> Result<Response<GetPublicKeyResponse>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.get_public_key_inner(request).await;
+        self.record("get_public_key", started, &result);
+        result
     }
 }

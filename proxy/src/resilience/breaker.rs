@@ -158,8 +158,7 @@ impl CircuitBreaker {
                 let elapsed = window.opened_at.map(|t| t.elapsed());
                 if elapsed.is_some_and(|e| e >= self.config.cooldown) {
                     window.probe_successes = 0;
-                    self.state
-                        .store(State::HalfOpen.as_u8(), Ordering::Relaxed);
+                    self.state.store(State::HalfOpen.as_u8(), Ordering::Relaxed);
                     tracing::info!("circuit breaker half-open, probing");
                     true
                 } else {

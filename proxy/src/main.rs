@@ -14,18 +14,36 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use grpc_low_latency_proxy::authz::{Authorizer, Policy};
 use grpc_low_latency_proxy::cache::{CacheConfig, PublicKeyCache};
-use grpc_low_latency_proxy::resilience::{
-    BreakerConfig, CircuitBreaker, RateLimitConfig, RateLimiter,
-};
 use grpc_low_latency_proxy::grpc::{PooledService, SingleSessionService};
 use grpc_low_latency_proxy::pkcs11::{Pool, PoolConfig, TokenConfig};
 use grpc_low_latency_proxy::proto::v1::hsm_service_server::HsmServiceServer;
 use grpc_low_latency_proxy::proto::v1::FILE_DESCRIPTOR_SET;
+use grpc_low_latency_proxy::resilience::{
+    BreakerConfig, CircuitBreaker, RateLimitConfig, RateLimiter,
+};
+use grpc_low_latency_proxy::telemetry;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+
+    // rustls refuses to pick a crypto provider when more than one is available, and
+    // this crate makes two reachable: tonic's tls-ring feature, and the `ring` used
+    // directly for in-process ECDSA verification (M5). Without an explicit choice the
+    // server panics on the first TLS handshake -- which only shows up when TLS is on,
+    // so local plaintext benchmarking never hit it.
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("a rustls crypto provider was already installed");
+    }
+
+    // Installed before anything else records: metrics emitted before the recorder exists
+    // are silently dropped, which shows up later as a dashboard panel that is empty for
+    // no discoverable reason.
+    let prometheus = telemetry::install()?;
 
     let token = TokenConfig::from_env()?;
     let listen_addr: std::net::SocketAddr = std::env::var("LISTEN_ADDR")
@@ -60,8 +78,10 @@ async fn main() -> Result<()> {
 
     match mode.as_str() {
         "pool" => {
+            let pool_config = PoolConfig::from_env();
+            let pool_workers = pool_config.workers;
             let pool = Arc::new(
-                Pool::start(token, PoolConfig::from_env())
+                Pool::start(token, pool_config)
                     .map_err(|e| anyhow::anyhow!("failed to start worker pool: {e}"))?,
             );
 
@@ -89,6 +109,24 @@ async fn main() -> Result<()> {
                 tracing::info!("rate limiting disabled (set RATE_LIMIT_PER_SECOND to enable)");
             }
 
+            metrics::gauge!(telemetry::metrics::WORKERS).set(pool_workers as f64);
+            telemetry::spawn_gauge_sampler(
+                Arc::clone(&pool),
+                Arc::clone(&cache),
+                Arc::clone(&breaker),
+                std::time::Duration::from_secs(1),
+            );
+
+            let metrics_addr: std::net::SocketAddr = std::env::var("METRICS_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
+                .parse()
+                .context("METRICS_ADDR is not a valid socket address")?;
+            tokio::spawn(async move {
+                if let Err(e) = telemetry::serve(prometheus, metrics_addr).await {
+                    tracing::error!(error = %e, "metrics endpoint stopped");
+                }
+            });
+
             let service = PooledService::new(
                 Arc::clone(&pool),
                 authorizer,
@@ -105,7 +143,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("gRPC server failed")?;
 
-                    report_pool_metrics(&pool);
+            report_pool_metrics(&pool);
             {
                 use std::sync::atomic::Ordering;
                 tracing::info!(
@@ -138,8 +176,9 @@ async fn main() -> Result<()> {
                 tracing::info!(
                     allowed = m.allowed_total.load(std::sync::atomic::Ordering::Relaxed),
                     denied = m.denied_total.load(std::sync::atomic::Ordering::Relaxed),
-                    unauthenticated =
-                        m.unauthenticated_total.load(std::sync::atomic::Ordering::Relaxed),
+                    unauthenticated = m
+                        .unauthenticated_total
+                        .load(std::sync::atomic::Ordering::Relaxed),
                     "authorization metrics"
                 );
             }
@@ -249,7 +288,9 @@ fn server_builder(security: &Option<Security>, admission: &AdmissionConfig) -> R
         // load_shed is what makes the limit protect the tail rather than merely cap
         // it: without it, requests over the limit wait in a tower queue, which is the
         // unbounded-queueing failure this whole milestone exists to avoid.
-        builder = builder.concurrency_limit_per_connection(limit).load_shed(true);
+        builder = builder
+            .concurrency_limit_per_connection(limit)
+            .load_shed(true);
     }
 
     if let Some(timeout) = admission.request_timeout {

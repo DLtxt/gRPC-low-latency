@@ -1,0 +1,13 @@
+# Provisioned so the dashboard has data on first boot with no manual setup --
+# plan.md M7 exit criterion is "docker compose up, zero clicks".
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 1s

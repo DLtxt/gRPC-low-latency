@@ -1,4 +1,4 @@
-# M6 findings — resiliency, and a measurement I could not make
+# M6 findings — resiliency under overload
 
 Status: **implementation complete, unit-tested, and measured on two hosts.** The exit
 criterion is partly met: error rate is bounded and accepted throughput is preserved under

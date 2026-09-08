@@ -178,11 +178,10 @@ pub fn public_key_to_spki_der(
 ///
 /// `ring` takes a raw point rather than SPKI, so the cached DER has to be unwrapped.
 pub fn sec1_point_from_spki(spki_der: &[u8]) -> Result<Vec<u8>> {
-    use p256::pkcs8::DecodePublicKey;
     use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::pkcs8::DecodePublicKey;
 
-    let key = p256::PublicKey::from_public_key_der(spki_der)
-        .context("not a valid P-256 SPKI")?;
+    let key = p256::PublicKey::from_public_key_der(spki_der).context("not a valid P-256 SPKI")?;
     Ok(key.to_encoded_point(false).as_bytes().to_vec())
 }
 

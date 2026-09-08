@@ -26,6 +26,12 @@ down: ## Stop containers, keep the token volume
 clean: ## Stop containers AND destroy the token volume
 	$(COMPOSE) down -v
 
+dash: ## Open the Grafana dashboard (stack must be up)
+	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3000}"
+	@echo "Prometheus: http://localhost:$${PROMETHEUS_PORT:-9090}"
+	@echo "Raw metrics: http://localhost:$${METRICS_PORT:-9464}/metrics"
+	@command -v open >/dev/null && open "http://localhost:$${GRAFANA_PORT:-3000}" || true
+
 logs: ## Tail proxy logs
 	$(COMPOSE) logs -f proxy
 

@@ -70,7 +70,9 @@ fn main() -> Result<()> {
     println!("slot        : {}", slot.id());
 
     // 3. Open a R/W session and log in as the user.
-    let session = pkcs11.open_rw_session(slot).context("C_OpenSession failed")?;
+    let session = pkcs11
+        .open_rw_session(slot)
+        .context("C_OpenSession failed")?;
     session
         .login(UserType::User, Some(&AuthPin::new(user_pin.into())))
         .context("C_Login(CKU_USER) failed -- wrong PIN?")?;
@@ -100,7 +102,11 @@ fn main() -> Result<()> {
         .context("C_Sign(CKM_ECDSA) failed")?;
 
     println!("digest      : {}", hex(&digest));
-    println!("signature   : {} ({} bytes)", hex(&signature), signature.len());
+    println!(
+        "signature   : {} ({} bytes)",
+        hex(&signature),
+        signature.len()
+    );
 
     // 6. Verify through the token, proving the signature is real rather than just bytes.
     session
