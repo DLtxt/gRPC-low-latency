@@ -14,6 +14,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use grpc_low_latency_proxy::authz::{Authorizer, Policy};
 use grpc_low_latency_proxy::cache::{CacheConfig, PublicKeyCache};
+use grpc_low_latency_proxy::resilience::{
+    BreakerConfig, CircuitBreaker, RateLimitConfig, RateLimiter,
+};
 use grpc_low_latency_proxy::grpc::{PooledService, SingleSessionService};
 use grpc_low_latency_proxy::pkcs11::{Pool, PoolConfig, TokenConfig};
 use grpc_low_latency_proxy::proto::v1::hsm_service_server::HsmServiceServer;
@@ -34,6 +37,13 @@ async fn main() -> Result<()> {
     // identity, and without an identity the policy cannot be evaluated. Enabling one
     // without the other would be security theatre, so they are configured as a unit.
     let security = load_security()?;
+    let admission = AdmissionConfig::from_env();
+    tracing::info!(
+        max_concurrent_streams = ?admission.max_concurrent_streams,
+        concurrency_limit_per_connection = ?admission.concurrency_limit_per_connection,
+        request_timeout_ms = ?admission.request_timeout.map(|d| d.as_millis()),
+        "admission control"
+    );
 
     let reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
@@ -65,10 +75,30 @@ async fn main() -> Result<()> {
             );
             let cache = Arc::new(PublicKeyCache::new(cache_config));
 
-            let service = PooledService::new(Arc::clone(&pool), authorizer, Arc::clone(&cache));
+            let breaker = Arc::new(CircuitBreaker::new(BreakerConfig::from_env()));
+
+            let rate_limiter = RateLimitConfig::from_env().map(|config| {
+                tracing::info!(
+                    per_second = config.per_second,
+                    burst = config.burst,
+                    "per-identity rate limiting enabled"
+                );
+                Arc::new(RateLimiter::new(config))
+            });
+            if rate_limiter.is_none() {
+                tracing::info!("rate limiting disabled (set RATE_LIMIT_PER_SECOND to enable)");
+            }
+
+            let service = PooledService::new(
+                Arc::clone(&pool),
+                authorizer,
+                Arc::clone(&cache),
+                rate_limiter.clone(),
+                Arc::clone(&breaker),
+            );
             tracing::info!(%listen_addr, tls = security.is_some(), "gRPC server listening");
 
-            server_builder(&security)?
+            server_builder(&security, &admission)?
                 .add_service(HsmServiceServer::new(service))
                 .add_service(reflection)
                 .serve_with_shutdown(listen_addr, shutdown_signal())
@@ -76,6 +106,22 @@ async fn main() -> Result<()> {
                 .context("gRPC server failed")?;
 
                     report_pool_metrics(&pool);
+            {
+                use std::sync::atomic::Ordering;
+                tracing::info!(
+                    state = breaker.state().as_str(),
+                    trips = breaker.trips.load(Ordering::Relaxed),
+                    rejected = breaker.rejected.load(Ordering::Relaxed),
+                    "circuit breaker metrics"
+                );
+                if let Some(limiter) = &rate_limiter {
+                    tracing::info!(
+                        allowed = limiter.allowed.load(Ordering::Relaxed),
+                        rejected = limiter.rejected.load(Ordering::Relaxed),
+                        "rate limiter metrics"
+                    );
+                }
+            }
             {
                 let m = cache.metrics();
                 tracing::info!(
@@ -109,7 +155,7 @@ async fn main() -> Result<()> {
             let service = SingleSessionService::connect(&token)?;
             tracing::info!(%listen_addr, tls = security.is_some(), "gRPC server listening (M2 baseline)");
 
-            server_builder(&security)?
+            server_builder(&security, &admission)?
                 .add_service(HsmServiceServer::new(service))
                 .add_service(reflection)
                 .serve_with_shutdown(listen_addr, shutdown_signal())
@@ -151,14 +197,66 @@ struct Security {
     authorizer: Arc<Authorizer>,
 }
 
-/// A server builder with TLS applied when configured.
-fn server_builder(security: &Option<Security>) -> Result<Server> {
-    match security {
+/// Admission control applied at the transport, before a request becomes a task.
+///
+/// M6 measured where overload latency actually accrues: with the pool's bounded queue
+/// as the only defence, queue wait was 308 us and HSM service 259 us, while the p99 of
+/// *accepted* requests reached ~9 ms. Roughly 97% of that was spent before the request
+/// ever reached the shedding point -- in HTTP/2 stream handling and Tokio scheduling
+/// under heavy contention.
+///
+/// Shedding at the pool queue protects the pool. It does not protect the tail, because
+/// by then the damage is done. These limits push the refusal upstream:
+///
+/// * `max_concurrent_streams` bounds how many requests HTTP/2 will accept at once, so
+///   excess waits at the protocol level instead of becoming a scheduled task.
+/// * `concurrency_limit_per_connection` bounds in-flight handler work.
+/// * `load_shed` turns "at the limit" into an immediate rejection rather than a queue.
+struct AdmissionConfig {
+    max_concurrent_streams: Option<u32>,
+    concurrency_limit_per_connection: Option<usize>,
+    request_timeout: Option<std::time::Duration>,
+}
+
+impl AdmissionConfig {
+    fn from_env() -> Self {
+        fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
+            std::env::var(key).ok()?.parse().ok()
+        }
+        Self {
+            max_concurrent_streams: env_parse("MAX_CONCURRENT_STREAMS"),
+            concurrency_limit_per_connection: env_parse("CONCURRENCY_LIMIT_PER_CONNECTION"),
+            request_timeout: env_parse::<u64>("REQUEST_TIMEOUT_MS")
+                .map(std::time::Duration::from_millis),
+        }
+    }
+}
+
+/// A server builder with TLS and admission control applied.
+fn server_builder(security: &Option<Security>, admission: &AdmissionConfig) -> Result<Server> {
+    let mut builder = match security {
         Some(security) => Server::builder()
             .tls_config(security.tls.clone())
-            .context("failed to apply TLS configuration"),
-        None => Ok(Server::builder()),
+            .context("failed to apply TLS configuration")?,
+        None => Server::builder(),
+    };
+
+    if let Some(streams) = admission.max_concurrent_streams {
+        builder = builder.max_concurrent_streams(Some(streams));
     }
+
+    if let Some(limit) = admission.concurrency_limit_per_connection {
+        // load_shed is what makes the limit protect the tail rather than merely cap
+        // it: without it, requests over the limit wait in a tower queue, which is the
+        // unbounded-queueing failure this whole milestone exists to avoid.
+        builder = builder.concurrency_limit_per_connection(limit).load_shed(true);
+    }
+
+    if let Some(timeout) = admission.request_timeout {
+        builder = builder.timeout(timeout);
+    }
+
+    Ok(builder)
 }
 
 /// Load certificates and the authorization policy.

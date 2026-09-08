@@ -13,6 +13,7 @@ use crate::authz::{Authorizer, Operation};
 use crate::cache::{CachedPublicKey, Lookup, PublicKeyCache};
 use crate::crypto::{self, SigningInput};
 use crate::pkcs11::{JobRequest, JobResponse, Pool, PoolError};
+use crate::resilience::{CircuitBreaker, RateLimiter};
 use crate::proto::v1::{
     hsm_service_server::HsmService, signing_input, CipherMechanism, DecryptRequest, DecryptResponse,
     EncryptRequest, EncryptResponse, GetPublicKeyRequest, GetPublicKeyResponse, SignRequest,
@@ -30,6 +31,11 @@ pub struct PooledService {
     authorizer: Option<Arc<Authorizer>>,
     /// Public keys only. Nothing derived from a private key is ever stored here.
     cache: Arc<PublicKeyCache>,
+    /// `None` disables rate limiting. Absent configuration means no limit rather than a
+    /// guessed one, since a limit below real capacity becomes the bottleneck it exists
+    /// to prevent.
+    rate_limiter: Option<Arc<RateLimiter>>,
+    breaker: Arc<CircuitBreaker>,
 }
 
 impl PooledService {
@@ -37,11 +43,75 @@ impl PooledService {
         pool: Arc<Pool>,
         authorizer: Option<Arc<Authorizer>>,
         cache: Arc<PublicKeyCache>,
+        rate_limiter: Option<Arc<RateLimiter>>,
+        breaker: Arc<CircuitBreaker>,
     ) -> Self {
         Self {
             pool,
             authorizer,
             cache,
+            rate_limiter,
+            breaker,
+        }
+    }
+
+    /// Admission control, run before any work is done.
+    ///
+    /// Order matters and is chosen so the cheapest rejection happens first: the circuit
+    /// breaker is a single atomic load, the rate limiter is a hash lookup, and
+    /// authorization parses nothing but does consult the policy. Doing expensive checks
+    /// before cheap ones would mean paying the most for requests we are about to refuse.
+    fn admit<T>(
+        &self,
+        request: &Request<T>,
+        key_label: &str,
+        operation: Operation,
+    ) -> Result<(), Status> {
+        // 1. Is the dependency healthy? If not, fail immediately rather than spending a
+        //    worker slot and the caller's deadline to discover it again.
+        if !self.breaker.allow() {
+            return Err(Status::unavailable(
+                "circuit breaker is open; the HSM is failing. Retry after backoff.",
+            ));
+        }
+
+        // 2. Who is calling, and are they allowed?
+        let identity = match &self.authorizer {
+            Some(authorizer) => Some(authorizer.authorize(request, key_label, operation)?),
+            None => None,
+        };
+
+        // 3. Are they within their share? Checked after authorization so an unauthorized
+        //    caller cannot consume a legitimate identity's tokens.
+        if let (Some(limiter), Some(identity)) = (&self.rate_limiter, &identity) {
+            if !limiter.check(identity) {
+                tracing::debug!(%identity, "rate limit exceeded");
+                return Err(Status::resource_exhausted(
+                    "rate limit exceeded for this workload identity",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Report an outcome to the breaker.
+    ///
+    /// Only failures that indicate the *token* is unhealthy count. A bad key label or a
+    /// malformed request is the caller's fault, and counting those would let one
+    /// misbehaving client trip the circuit for everyone.
+    fn observe<T>(&self, result: &Result<T, Status>) {
+        match result {
+            Ok(_) => self.breaker.record_success(),
+            Err(status) => match status.code() {
+                tonic::Code::Internal | tonic::Code::DeadlineExceeded => {
+                    self.breaker.record_failure()
+                }
+                // Overload is a capacity signal, not a health signal: the token is fine,
+                // there is simply more work than slots. Tripping on it would convert a
+                // busy service into an unavailable one.
+                _ => self.breaker.record_success(),
+            },
         }
     }
 
@@ -53,7 +123,8 @@ impl PooledService {
         let pool = Arc::clone(&self.pool);
         let label = key_label.to_string();
 
-        self.cache
+        let outcome = self
+            .cache
             .get_or_load(key_label, || async move {
                 match pool
                     .submit(JobRequest::GetPublicKey { key_label: label })
@@ -73,21 +144,12 @@ impl PooledService {
                 }
             })
             .await
-            .map_err(|e| to_status(PoolError::Internal(e.to_string())))
+            .map_err(|e| to_status(PoolError::Internal(e.to_string())));
+
+        self.observe(&outcome);
+        outcome
     }
 
-    /// Authorize, or pass through when running without mTLS.
-    fn check<T>(
-        &self,
-        request: &Request<T>,
-        key_label: &str,
-        operation: Operation,
-    ) -> Result<(), Status> {
-        match &self.authorizer {
-            Some(authorizer) => authorizer.authorize(request, key_label, operation).map(|_| ()),
-            None => Ok(()),
-        }
-    }
 }
 
 /// Map pool failures onto gRPC statuses.
@@ -150,7 +212,7 @@ fn unexpected(response: JobResponse) -> Status {
 #[tonic::async_trait]
 impl HsmService for PooledService {
     async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
-        self.check(&request, &request.get_ref().key_label, Operation::Sign)?;
+        self.admit(&request, &request.get_ref().key_label, Operation::Sign)?;
         let request = request.into_inner();
         let input = extract_input(request.input)?;
         let prepared = crypto::prepare(request.mechanism, input)
@@ -164,7 +226,9 @@ impl HsmService for PooledService {
                 payload: prepared.payload,
             })
             .await
-            .map_err(to_status)?;
+            .map_err(to_status);
+        self.observe(&response);
+        let response = response?;
 
         match response {
             JobResponse::Signature(signature) => Ok(Response::new(SignResponse {
@@ -179,7 +243,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<VerifyRequest>,
     ) -> Result<Response<VerifyResponse>, Status> {
-        self.check(&request, &request.get_ref().key_label, Operation::Verify)?;
+        self.admit(&request, &request.get_ref().key_label, Operation::Verify)?;
         let request = request.into_inner();
         let input = extract_input(request.input)?;
 
@@ -211,7 +275,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<EncryptRequest>,
     ) -> Result<Response<EncryptResponse>, Status> {
-        self.check(&request, &request.get_ref().key_label, Operation::Encrypt)?;
+        self.admit(&request, &request.get_ref().key_label, Operation::Encrypt)?;
         let request = request.into_inner();
         require_aes_gcm(request.mechanism)?;
 
@@ -229,7 +293,9 @@ impl HsmService for PooledService {
                 iv: iv.clone(),
             })
             .await
-            .map_err(to_status)?;
+            .map_err(to_status);
+        self.observe(&response);
+        let response = response?;
 
         match response {
             JobResponse::Ciphertext(ciphertext) => {
@@ -243,7 +309,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<DecryptRequest>,
     ) -> Result<Response<DecryptResponse>, Status> {
-        self.check(&request, &request.get_ref().key_label, Operation::Decrypt)?;
+        self.admit(&request, &request.get_ref().key_label, Operation::Decrypt)?;
         let request = request.into_inner();
         require_aes_gcm(request.mechanism)?;
 
@@ -263,7 +329,9 @@ impl HsmService for PooledService {
                 iv: request.iv,
             })
             .await
-            .map_err(to_status)?;
+            .map_err(to_status);
+        self.observe(&response);
+        let response = response?;
 
         match response {
             JobResponse::Plaintext(plaintext) => Ok(Response::new(DecryptResponse { plaintext })),
@@ -275,7 +343,7 @@ impl HsmService for PooledService {
         &self,
         request: Request<GetPublicKeyRequest>,
     ) -> Result<Response<GetPublicKeyResponse>, Status> {
-        self.check(&request, &request.get_ref().key_label, Operation::GetPublicKey)?;
+        self.admit(&request, &request.get_ref().key_label, Operation::GetPublicKey)?;
         let request = request.into_inner();
 
         let (lookup, served_from_cache) = self.public_key(&request.key_label).await?;

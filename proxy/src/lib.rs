@@ -11,3 +11,4 @@ pub mod crypto;
 pub mod grpc;
 pub mod pkcs11;
 pub mod proto;
+pub mod resilience;
