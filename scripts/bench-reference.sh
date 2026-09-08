@@ -44,6 +44,43 @@ run "RSA-2048 - worker pool" \
     MODE=pool KEY=demo-rsa-2048 MECHANISM=SIGNATURE_MECHANISM_RSA_PKCS_SHA256 \
     REQUESTS=8000 CONCURRENCIES="1 2 4 8 12 16 24 32"
 
+# Cached verify: M5's headline workload, and the only one where the token is absent
+# from the path entirely. Needs a valid signature first, which means grpcurl -- ghz
+# reports statuses but not response bodies, so it cannot mint one itself.
+if command -v grpcurl >/dev/null 2>&1; then
+    echo
+    echo "############ ECDSA verify - cached public key ############"
+    PAYLOAD="$(printf 'benchmark payload' | base64)"
+    PROBE_PORT=50052
+
+    PROXY_TLS=off PROXY_MODE=pool HSM_WORKERS=4 LISTEN_ADDR="127.0.0.1:${PROBE_PORT}" \
+        ./proxy/target/release/proxy >/tmp/gll-signer.log 2>&1 &
+    SIGNER_PID=$!
+    sleep 3
+
+    SIG="$(grpcurl -plaintext \
+        -d "{\"keyLabel\":\"demo-ec-p256\",\"mechanism\":\"SIGNATURE_MECHANISM_ECDSA_SHA256\",\"input\":{\"message\":\"${PAYLOAD}\"}}" \
+        "127.0.0.1:${PROBE_PORT}" hsm.v1.HsmService/Sign 2>/dev/null \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin)["signature"])')"
+
+    kill "${SIGNER_PID}" 2>/dev/null || true
+    wait "${SIGNER_PID}" 2>/dev/null || true
+
+    if [ -n "${SIG}" ]; then
+        MODE=pool HSM_WORKERS=4 REQUESTS=20000 \
+        CALL=hsm.v1.HsmService/Verify \
+        CONCURRENCIES="4 8 12 16 24 32 48" \
+        DATA="{\"key_label\":\"demo-ec-p256\",\"mechanism\":\"SIGNATURE_MECHANISM_ECDSA_SHA256\",\"input\":{\"message\":\"${PAYLOAD}\"},\"signature\":\"${SIG}\"}" \
+            ./scripts/bench-sweep.sh
+    else
+        echo "SKIPPED: could not obtain a signature to verify against"
+    fi
+else
+    echo
+    echo "############ ECDSA verify - SKIPPED (grpcurl not installed) ############"
+    echo "install grpcurl to include M5's cached-verify workload in the suite"
+fi
+
 # The token's own ceiling, with no gRPC in the path, so proxy overhead and token
 # limits are never confused for one another.
 echo

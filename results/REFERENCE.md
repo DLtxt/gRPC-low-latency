@@ -106,5 +106,17 @@ reports a *higher* QPS than one that serves it. A row with errors is not a resul
 
 ## Status
 
-No reference runs have been recorded yet. Every number quoted in `docs/` so far is from
-the local M2 laptop and is provisional.
+| Host | Status |
+|---|---|
+| `c7g.2xlarge` (Graviton3) | **run 2026-09-08** at commit `f9afbfd` — see [`docs/reference-run-c7g.md`](../docs/reference-run-c7g.md) |
+| `c7i.2xlarge` (Intel) | not yet run |
+
+Headline from the ARM run: **11,915 QPS ECDSA signing at p99 < 2 ms**, and **17,260 QPS**
+for cached verification.
+
+The run also showed that the M2 laptop figures used through M3-M5 were misleading rather
+than merely imprecise: RSA throughput is *lower* on Graviton3 (slower per-operation) while
+its worker scaling is *far better* (7.93x at 8 threads against 3.69x). The laptop's
+asymmetric cores had been capping the scaling curve, and that cap was mistakenly read as a
+property of SoftHSM2. Figures in `docs/m3-findings.md` through `docs/m5-findings.md`
+remain valid as laptop measurements and should be labelled as such.

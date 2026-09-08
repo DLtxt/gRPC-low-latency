@@ -6,6 +6,7 @@
 set -euo pipefail
 
 GHZ_VERSION="${GHZ_VERSION:-0.121.0}"
+GRPCURL_VERSION="${GRPCURL_VERSION:-1.9.3}"
 REPO_DIR="${REPO_DIR:-$HOME/gRPC-low-latency}"
 TOKEN_LABEL="${TOKEN_LABEL:-grpc-low-latency}"
 
@@ -56,6 +57,24 @@ if ! command -v ghz >/dev/null 2>&1; then
         "https://github.com/bojand/ghz/releases/download/v${GHZ_VERSION}/ghz-linux-${GHZ_ARCH}.tar.gz"
     tar -xzf "${TMP}/ghz.tar.gz" -C "${TMP}"
     ${SUDO} install -m 0755 "${TMP}/ghz" /usr/local/bin/ghz
+    rm -rf "${TMP}"
+fi
+
+# --- grpcurl ------------------------------------------------------------------
+# The reference suite needs it to mint a signature for the cached-verify sweep:
+# ghz reports statuses but not response bodies, so it cannot produce one itself.
+if ! command -v grpcurl >/dev/null 2>&1; then
+    log "installing grpcurl ${GRPCURL_VERSION}"
+    case "$(uname -m)" in
+        x86_64)  GRPCURL_ARCH=x86_64 ;;
+        aarch64) GRPCURL_ARCH=arm64 ;;
+        *) echo "unsupported architecture $(uname -m) for grpcurl" >&2; exit 1 ;;
+    esac
+    TMP="$(mktemp -d)"
+    curl -sSfL -o "${TMP}/grpcurl.tar.gz" \
+        "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${GRPCURL_ARCH}.tar.gz"
+    tar -xzf "${TMP}/grpcurl.tar.gz" -C "${TMP}" grpcurl
+    ${SUDO} install -m 0755 "${TMP}/grpcurl" /usr/local/bin/grpcurl
     rm -rf "${TMP}"
 fi
 
