@@ -108,15 +108,21 @@ reports a *higher* QPS than one that serves it. A row with errors is not a resul
 
 | Host | Status |
 |---|---|
-| `c7g.2xlarge` (Graviton3) | **run 2026-09-08** at commit `f9afbfd` — see [`docs/reference-run-c7g.md`](../docs/reference-run-c7g.md) |
-| `c7i.2xlarge` (Intel) | not yet run |
+| `c7g.2xlarge` (Graviton3) | **run 2026-09-08** at commit `f9afbfd` |
+| `c7i.2xlarge` (Sapphire Rapids) | **run 2026-09-08** at commit `f9afbfd` |
 
-Headline from the ARM run: **11,915 QPS ECDSA signing at p99 < 2 ms**, and **17,260 QPS**
-for cached verification.
+Both architectures are measured. See [`docs/reference-runs.md`](../docs/reference-runs.md)
+for the comparison.
 
-The run also showed that the M2 laptop figures used through M3-M5 were misleading rather
-than merely imprecise: RSA throughput is *lower* on Graviton3 (slower per-operation) while
-its worker scaling is *far better* (7.93x at 8 threads against 3.69x). The laptop's
-asymmetric cores had been capping the scaling curve, and that cap was mistakenly read as a
-property of SoftHSM2. Figures in `docs/m3-findings.md` through `docs/m5-findings.md`
-remain valid as laptop measurements and should be labelled as such.
+**Headline: ~11,500-11,900 QPS of ECDSA signing at p99 < 2 ms**, with the two
+architectures agreeing to within 3.3%, and ~15,800-17,300 QPS for cached verification.
+
+The runs also explain the scaling ceiling that M3 attributed to SoftHSM2. RSA worker
+scaling tracks *full-performance physical cores*, not vCPUs: 7.93x on the eight real cores
+of `c7g.2xlarge` against 4.32x on `c7i.2xlarge` (four physical plus SMT) and 3.69x on the
+M2 laptop (four performance plus four efficiency). Cryptographic work saturates the
+execution units, so a hyperthread sibling adds nothing.
+
+Figures in `docs/m3-findings.md` through `docs/m5-findings.md` were taken on the M2 laptop
+and were wrong in magnitude and, for RSA, in direction. They remain valid only as laptop
+measurements.

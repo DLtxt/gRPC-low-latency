@@ -120,8 +120,8 @@ the script should be extended before the next run so the suite covers it. Produc
 signature for that sweep also required `grpcurl` on the host, since `ghz` does not return
 response bodies — the bootstrap does not install it.
 
-## Not yet done
+## Superseded
 
-`c7i.2xlarge` (Intel, x86_64) has not been run. Until it is, the scaling curves are
-evidence about Graviton3 rather than about the design. Given how far the two machines
-already diverge on RSA, the x86 run is worth more than it looked before this one.
+`c7i.2xlarge` has since been run. See [`reference-runs.md`](reference-runs.md) for the
+two-architecture comparison, which explains the RSA scaling ceiling this document could
+only describe: it tracks physical core count, not SoftHSM2.
