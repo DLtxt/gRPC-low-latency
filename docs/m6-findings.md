@@ -1,7 +1,9 @@
 # M6 findings — resiliency, and a measurement I could not make
 
-Status: **implementation complete and unit-tested. The headline overload claim is not
-verified**, because this laptop cannot measure it. See "What could not be measured".
+Status: **implementation complete, unit-tested, and measured on two hosts.** The exit
+criterion is partly met: error rate is bounded and accepted throughput is preserved under
+overload, but accepted p99 does not stay flat. See "The overload measurement, settled on
+two hosts" for the numbers and why.
 
 ## What was built
 
@@ -66,41 +68,79 @@ protect the tail the refusal has to happen upstream, before a request becomes a 
 task. That is what the transport-level limits are for, and they help — `max_concurrent_
 streams=4` moved accepted p99 from 13.55 ms to 9.17 ms — but they do not make it flat.
 
-## What could not be measured
+## The overload measurement, settled on two hosts
 
-plan.md's exit criterion is "at 3× capacity, accepted-request p99 stays flat while
-rejections rise." I could not establish whether that holds, and the reason is
-methodological rather than incidental.
+The single-host attempt was abandoned: with `ghz` beside the proxy, changing only client
+concurrency swung accepted p99 between 0.65 ms and 105 ms, and `mean_service_us` — pure
+HSM time inside a worker, with no queueing — rose from 259 to 500 µs purely from CPU
+starvation. Closed-loop load made it worse still, because fast rejections free a slot
+immediately and the client simply sends more, so "capacity" becomes an artifact of how
+quickly the server says no.
 
-**The load generator shares eight cores with the proxy.** Under overload `ghz` is itself
-a heavy CPU consumer, so the experiment measures the two processes competing rather than
-the server's behaviour. The evidence that this dominates:
+The numbers below come from two `c7g.2xlarge` instances in the same availability zone:
+proxy on one, load generator on the other, open-loop at a fixed offered rate, 8 workers,
+queue depth 16.
 
-- Changing only client concurrency, with the server configuration identical, moved
-  accepted p99 between 0.65 ms and 105 ms across runs.
-- `mean_service_us` — pure HSM time inside the worker, with no queueing — rose from 259 µs
-  to 500 µs as client concurrency increased. The token did not get slower; the server was
-  being starved of CPU by the client.
-- Closed-loop and open-loop load produced contradictory pictures of the same server.
-  Closed-loop is actively misleading here: fast rejections return quickly, so `ghz`
-  immediately sends more, and the measured "capacity" collapses to an artifact.
+### Below capacity, the tail is flat
 
-One open-loop sweep did show the desired shape — accepted p99 flat at 0.65–1.22 ms from
-1× to 3× offered load while shedding rose — but a neighbouring sweep with different client
-concurrency showed the opposite, so it is not a result, it is a coincidence pending
-confirmation.
+| Offered | Achieved | Shed | Accepted p50 | Accepted p99 |
+|---|---|---|---|---|
+| 4,000 | 3,999 | 0% | 0.29 ms | 0.48 ms |
+| 8,000 | 7,999 | 0% | 0.29 ms | 0.49 ms |
+| 12,000 | 11,998 | 0% | 0.31 ms | 0.56 ms |
+| 16,000 | 15,997 | 0% | 0.34 ms | 0.76 ms |
+| 20,000 | 19,995 | 0% | 0.42 ms | 1.15 ms |
 
-**This also qualifies the reference runs.** Those measured throughput at p99 below
-saturation, where client contention is modest and the ARM/x86 agreement to 3.3% suggests
-it was not distorting them. But every reference figure was likewise produced with `ghz` on
-the proxy's own host, and no overload figure from that setup should be trusted.
+**Capacity is ~22,000 QPS with p99 under 2 ms** — nearly double the ~11,900 measured when
+the load generator shared the host. The single-host figure was measuring contention, not
+the proxy.
 
-## What is needed to finish M6
+### Above capacity, throughput plateaus and the tail degrades gracefully
 
-A two-host benchmark: proxy on one instance, load generator on another, in the same
-placement group so network latency stays low and predictable. Until then the resiliency
-mechanisms are verified as *correct* — they trip, shed, limit, and isolate exactly as
-specified — but their effect on tail latency under overload is unquantified.
+| Offered | × capacity | Shed | Accepted throughput | Accepted p99 |
+|---|---|---|---|---|
+| 25,000 | 1.1× | 9% | ~22,700 QPS | 2.13 ms |
+| 30,000 | 1.4× | 27% | ~21,900 QPS | 3.38 ms |
+| 35,000 | 1.6× | 39% | ~21,300 QPS | 5.13 ms |
+| 40,000 | 1.8× | 46% | ~21,700 QPS | 6.80 ms |
+| 50,000 | 2.3× | 57% | ~21,500 QPS | 17.04 ms |
 
-`scripts/bench-sweep.sh` assumes it starts the proxy itself, so this needs a
-client-and-server split rather than a new flag. That is the next piece of harness work.
+**Accepted throughput holds at ~21,000–22,000 QPS across a 2× range of offered load.**
+That is the load shedding working: the service does not collapse, it refuses the excess
+and keeps serving its capacity. Error counts are bounded and proportionate rather than
+runaway.
+
+### The exit criterion, judged honestly
+
+plan.md asks for accepted p99 to stay *flat* at 3× capacity. It does not. It rises from
+1.15 ms at capacity to 17 ms at 2.3×.
+
+The reason is that rejection is cheap but not free. At 2.3× offered load the server is
+handling ~46,000 admission decisions per second to serve ~21,500 requests; the HTTP/2
+decode, task spawn, and rejection path for the other 24,500 consume CPU that accepted
+requests would otherwise have. Flat accepted latency under unbounded offered load would
+require rejection to cost nothing, which no in-process admission check can achieve — it
+would need to happen at a load balancer or in the kernel.
+
+So: **the first half of the criterion is met and the second is not.** Error rate is
+bounded and accepted throughput is preserved, which is the property that matters
+operationally. Accepted latency degrades, gradually and predictably, and stays within
+2 ms only up to about 1.1× capacity.
+
+A fair restatement for a service with this shape would be: *at 2× offered load, accepted
+throughput stays within 5% of capacity and the error rate is proportionate.* That is
+demonstrably true here, and it is the promise a caller actually depends on.
+
+## Two harness bugs worth recording
+
+`pkill -f release/proxy` matches the shell whose own command line contains that string, so
+the restart loop killed itself before it could start anything, and every subsequent
+measurement read 100% shed at 0.02 ms — which is what "connection refused" looks like if
+you are not reading the status column carefully. Fixed by matching the process name
+exactly (`pkill -x proxy`).
+
+Running `bootstrap-linux.sh` over a foreground SSH session is fragile: a dropped
+connection sends SIGHUP and kills the build midway, leaving a host that looks provisioned
+but is not. The AWS security group also pins SSH to a single address, and a dynamic IP
+that changes mid-run locks you out of your own instances. Long remote work should be
+started with `nohup setsid`.
