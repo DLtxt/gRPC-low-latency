@@ -1,0 +1,28 @@
+token ceiling: raw PKCS#11, no gRPC, 3s per point
+
+-- ECDSA P-256 (demo-ec-p256) --
+threads   ops/sec        per-op         scaling   
+1         13962          71.6 us        1.00x     
+2         23484          85.2 us        1.68x     
+4         35376          113.1 us       2.53x     
+6         33095          181.3 us       2.37x     
+8         33087          241.8 us       2.37x     
+12        32065          374.2 us       2.30x     
+16        31987          500.2 us       2.29x     
+
+-- RSA-2048 (demo-rsa-2048) --
+threads   ops/sec        per-op         scaling   
+1         673            1486.6 us      1.00x     
+2         1340           1492.9 us      1.99x     
+4         2676           1494.6 us      3.98x     
+6         4006           1497.8 us      5.96x     
+8         5331           1500.6 us      7.93x     
+12        4765           2518.2 us      7.08x     
+16        4554           3513.3 us      6.77x     
+
+-- ECDSA P-256 single-threaded cost, no gRPC --
+sign (token)                    71.1 us
+verify (token, OpenSSL)        115.0 us
+verify (in-process, p256)      310.0 us
+verify (in-process, ring)       67.5 us
+
