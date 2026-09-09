@@ -169,7 +169,7 @@ genuinely dominates and pooling produces a real gain.
 Accepted throughput holds at 21,000–22,000 QPS across a 2.3× range of offered load. The
 service refuses excess rather than collapsing.
 
-**Stated honestly:** accepted *latency* does degrade under sustained overload. Rejection
+Latency does degrade under sustained overload. Rejection
 is cheap but not free — at 2.3× the server handles ~46,000 admission decisions per second
 to serve ~21,500 requests. The claim this project makes is that throughput and error rate
 stay bounded, not that latency stays flat.
