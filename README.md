@@ -9,7 +9,7 @@ with mutual TLS, per-key authorization, and load shedding in the path.
 
 ---
 
-## ⚠️ SoftHSM2 is not an HSM
+## SoftHSM2
 
 This project runs against **SoftHSM2, a software token**. Key material sits in files on
 disk protected by nothing more than filesystem permissions. There is no tamper-resistant
