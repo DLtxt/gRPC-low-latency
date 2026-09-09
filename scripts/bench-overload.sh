@@ -46,6 +46,8 @@ PAYLOAD="$(printf 'overload probe' | base64)"
 DATA="{\"key_label\":\"${KEY}\",\"mechanism\":\"${MECHANISM}\",\"input\":{\"message\":\"${PAYLOAD}\"}}"
 
 echo "target:  ${TARGET}  (load generator is on this host, proxy is not)"
+# The address is printed for the operator but not written to the result file: it is an
+# internal network detail, and these files are committed to a public repository.
 echo "budget:  p99 < ${BUDGET_MS} ms for accepted requests"
 echo
 printf '%-9s %-10s %-9s %-8s %-11s %-11s %-11s\n' \
@@ -120,7 +122,7 @@ done
 python3 - "${TMP}" "${RESULT_FILE}" "${TARGET}" "${KEY}" "${MECHANISM}" "${BUDGET_MS}" <<'PY'
 import json, glob, sys, os
 
-tmp, out, target, key, mech, budget = sys.argv[1:7]
+tmp, out, _target, key, mech, budget = sys.argv[1:7]
 rows = []
 for path in sorted(glob.glob(os.path.join(tmp, "*.row")),
                    key=lambda p: int(os.path.basename(p).split("-")[1].split(".")[0])):
@@ -135,7 +137,10 @@ json.dump({
     "host_note": "load generator host; the proxy runs on a separate machine",
     "client_host": host,
     "run": {
-        "target": target,
+        # The address is an internal network detail and these files are committed, so
+        # the record keeps the fact that the proxy was remote, not where it was.
+        "target": "<remote host, address elided>",
+        "target_is_remote": True,
         "key_label": key,
         "mechanism": mech,
         "budget_p99_ms": float(budget),

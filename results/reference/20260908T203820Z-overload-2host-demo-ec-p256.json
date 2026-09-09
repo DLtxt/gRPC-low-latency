@@ -21,11 +21,12 @@
     "timestamp_utc": "2026-09-08T20:38:45Z"
   },
   "run": {
-    "target": "172.31.67.59:50051",
+    "target": "<remote host, address elided>",
     "key_label": "demo-ec-p256",
     "mechanism": "SIGNATURE_MECHANISM_ECDSA_SHA256",
     "budget_p99_ms": 2.0,
-    "mode": "open-loop (fixed offered rate)"
+    "mode": "open-loop (fixed offered rate)",
+    "target_is_remote": true
   },
   "rows": [
     {
