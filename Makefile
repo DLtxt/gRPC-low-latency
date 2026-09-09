@@ -50,9 +50,9 @@ bench-baseline: ## Same sweep against the M2 single-session baseline
 
 baseline: ## Go direct-PKCS#11 baseline: serial vs naive-concurrent vs pooled
 	@cd baseline && go build -o ../bin/baseline ./...
-	@SOFTHSM2_CONF=$(PWD)/.local/softhsm/softhsm2.conf \
-	 PKCS11_MODULE=$${PKCS11_MODULE:-/opt/homebrew/lib/softhsm/libsofthsm2.so} \
-	 TOKEN_LABEL=grpc-low-latency USER_PIN=$${USER_PIN:-1234} \
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	 SOFTHSM2_CONF=$(PWD)/.local/softhsm/softhsm2.conf \
+	 USER_PIN=$${USER_PIN:?run 'make env' first, or export USER_PIN} \
 	 ./scripts/run-baseline.sh
 
 records: ## Compare results against best_results.md and report what changed
@@ -62,10 +62,10 @@ table: ## Print the current best figures as markdown
 	@./scripts/render-results.py --table
 
 ceiling: ## Measure the token's own parallel ceiling (no gRPC in the path)
-	SOFTHSM2_CONF=$(PWD)/.local/softhsm/softhsm2.conf \
-	PKCS11_MODULE=/opt/homebrew/lib/softhsm/libsofthsm2.so \
-	TOKEN_LABEL=grpc-low-latency USER_PIN=1234 \
-	./proxy/target/release/hsm-ceiling
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	 SOFTHSM2_CONF=$(PWD)/.local/softhsm/softhsm2.conf \
+	 USER_PIN=$${USER_PIN:?run 'make env' first, or export USER_PIN} \
+	 ./proxy/target/release/hsm-ceiling
 
 spike: ## M0 spike: run the PKCS#11 benchmark probe in a container
 	docker build -q -f docker/spike/Dockerfile -t gll-spike:m0 . && docker run --rm gll-spike:m0

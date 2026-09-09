@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep CI honest about the same warnings a developer sees locally.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SoftHSM2
+        # Needed at build time for nothing, but the integration-style checks below load
+        # the module, so it has to be present rather than mocked.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq softhsm2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: proxy
+
+      - name: Format
+        working-directory: proxy
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: proxy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        working-directory: proxy
+        run: cargo test --locked
+
+      - name: Build release binaries
+        working-directory: proxy
+        run: cargo build --release --locked --bins
+
+  go:
+    name: Go
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SoftHSM2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq softhsm2
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: baseline/go.sum
+
+      - name: Vet
+        working-directory: baseline
+        run: go vet ./...
+
+      - name: Build
+        working-directory: baseline
+        run: go build ./...
+
+      - name: Test
+        working-directory: baseline
+        run: go test ./...
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - name: cargo-deny
+        working-directory: proxy
+        run: cargo deny --all-features check
+
+  secrets:
+    name: No committed secrets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: No key or certificate files in the tree
+        # Belt and braces alongside gitleaks: this catches a committed key even if it
+        # carries no recognisable secret pattern. For a project about key protection,
+        # a leaked private key is the one unrecoverable mistake.
+        run: |
+          if git ls-files | grep -E '\.(key|pem|p12|pfx)$'; then
+            echo "::error::key material is tracked in git"
+            exit 1
+          fi
+          echo "no key material tracked"
+
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SoftHSM2 and ghz
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq softhsm2
+          curl -sSfL -o /tmp/ghz.tar.gz \
+            https://github.com/bojand/ghz/releases/download/v0.121.0/ghz-linux-x86_64.tar.gz
+          tar -xzf /tmp/ghz.tar.gz -C /tmp ghz
+          sudo install -m0755 /tmp/ghz /usr/local/bin/ghz
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: proxy
+
+      - name: Build
+        working-directory: proxy
+        run: cargo build --release --locked --bins
+
+      - name: Provision a token
+        run: |
+          mkdir -p .local/softhsm/tokens
+          cat > .local/softhsm/softhsm2.conf <<CONF
+          directories.tokendir = ${PWD}/.local/softhsm/tokens
+          objectstore.backend = file
+          objectstore.umask = 0077
+          log.level = ERROR
+          slots.removable = false
+          slots.mechanisms = ALL
+          library.reset_on_fork = false
+          CONF
+          ./scripts/gen-env.sh
+          set -a; . ./.env; set +a
+          export SOFTHSM2_CONF="${PWD}/.local/softhsm/softhsm2.conf"
+          softhsm2-util --init-token --free --label grpc-low-latency \
+            --so-pin "${SO_PIN}" --pin "${USER_PIN}"
+          ./proxy/target/release/provision
+
+      - name: Smoke bench
+        # 1,000 requests through the real gRPC stack. Not a benchmark -- CI runners are
+        # shared and their numbers mean nothing -- but it proves the server starts,
+        # serves, and shuts down cleanly, which is what a smoke test is for.
+        run: |
+          set -a; . ./.env; set +a
+          export SOFTHSM2_CONF="${PWD}/.local/softhsm/softhsm2.conf"
+          export PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
+          PROXY_TLS=off PROXY_MODE=pool HSM_WORKERS=4 \
+            LISTEN_ADDR=127.0.0.1:50051 ./proxy/target/release/proxy &
+          PROXY_PID=$!
+          for _ in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/50051) 2>/dev/null && break
+            sleep 1
+          done
+
+          ghz --insecure --proto proto/hsm/v1/hsm.proto --import-paths proto \
+            --call hsm.v1.HsmService/Sign \
+            -d '{"key_label":"demo-ec-p256","mechanism":"SIGNATURE_MECHANISM_ECDSA_SHA256","input":{"message":"c21va2U="}}' \
+            -c 8 -n 1000 --connections 4 127.0.0.1:50051 | tee /tmp/ghz.txt
+
+          kill "${PROXY_PID}"
+
+          # Any non-OK status means the request path is broken, whatever the latency was.
+          # ghz prints an "Error distribution" section only when something failed, and
+          # a clean run reports every response under [OK].
+          if grep -q 'Error distribution' /tmp/ghz.txt; then
+            echo "::error::smoke bench returned errors"
+            exit 1
+          fi
+          if ! grep -qE '\[OK\]\s+1000 responses' /tmp/ghz.txt; then
+            echo "::error::expected 1000 OK responses"
+            exit 1
+          fi
+          echo "smoke bench clean"
+
+      - name: TLS and authorization smoke
+        run: |
+          set -a; . ./.env; set +a
+          export SOFTHSM2_CONF="${PWD}/.local/softhsm/softhsm2.conf"
+          export PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
+          ./scripts/gen-certs.sh
+
+          PROXY_MODE=pool HSM_WORKERS=2 LISTEN_ADDR=127.0.0.1:50052 \
+            ./proxy/target/release/proxy &
+          PROXY_PID=$!
+          for _ in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/50052) 2>/dev/null && break
+            sleep 1
+          done
+
+          # batch is denied demo-rsa-2048 by policy; if this ever succeeds, the
+          # authorization layer has silently stopped working.
+          if ghz --cacert certs/ca.crt --cert certs/batch.crt --key certs/batch.key \
+               --cname localhost --proto proto/hsm/v1/hsm.proto --import-paths proto \
+               --call hsm.v1.HsmService/Sign \
+               -d '{"key_label":"demo-rsa-2048","mechanism":"SIGNATURE_MECHANISM_RSA_PKCS_SHA256","input":{"message":"c21va2U="}}' \
+               -c 1 -n 5 --connections 1 127.0.0.1:50052 | grep -q '\[OK\]'; then
+            echo "::error::an unauthorized identity was permitted to sign"
+            kill "${PROXY_PID}"; exit 1
+          fi
+          kill "${PROXY_PID}"
+          echo "authorization denial confirmed"

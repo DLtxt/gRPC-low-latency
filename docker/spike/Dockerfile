@@ -20,10 +20,10 @@ COPY --from=build /app/proxy/target/release/spike /usr/local/bin/spike
 COPY docker/spike/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# No PINs here on purpose. The entrypoint generates a throwaway pair per run; pass
+# SO_PIN and USER_PIN in the environment to override.
 ENV PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so \
     TOKEN_LABEL=grpc-low-latency \
-    SO_PIN=0000 \
-    SPIKE_ITERATIONS=5000 \
-    USER_PIN=1234
+    SPIKE_ITERATIONS=5000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

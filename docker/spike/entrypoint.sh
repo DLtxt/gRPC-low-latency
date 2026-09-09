@@ -4,8 +4,15 @@
 set -eu
 
 TOKEN_LABEL="${TOKEN_LABEL:-grpc-low-latency}"
-SO_PIN="${SO_PIN:-0000}"
-USER_PIN="${USER_PIN:-1234}"
+
+# Generated per container rather than baked into the image. The token here is a
+# throwaway created inside the container and discarded with it, so the PIN protects
+# nothing -- but a literal PIN in a tracked file is a pattern worth not teaching, and
+# a project about key protection is the last place to ship one.
+rand_pin() { LC_ALL=C tr -dc '0-9' < /dev/urandom | head -c 8; }
+SO_PIN="${SO_PIN:-$(rand_pin)}"
+USER_PIN="${USER_PIN:-$(rand_pin)}"
+export USER_PIN
 
 mkdir -p /var/lib/softhsm/tokens
 
