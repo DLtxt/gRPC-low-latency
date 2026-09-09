@@ -38,6 +38,7 @@ logs: ## Tail proxy logs
 check: env ## M1 exit check: can the proxy open the shared token read/write?
 	$(COMPOSE) run --rm --build proxy
 
+# After any run, compare against best_results.md and update anything beaten.
 bench: ## Sweep concurrency and report max QPS under the p99 budget (plaintext)
 	./scripts/bench-sweep.sh
 

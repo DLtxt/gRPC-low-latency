@@ -112,7 +112,9 @@ reports a *higher* QPS than one that serves it. A row with errors is not a resul
 | `c7i.2xlarge` (Sapphire Rapids) | **run 2026-09-08** at commit `f9afbfd` |
 
 Both architectures are measured. See [`docs/reference-runs.md`](../docs/reference-runs.md)
-for the comparison.
+for the comparison, and [`best_results.md`](../best_results.md) for the best figures
+achieved so far -- that file is the running record and should be updated whenever a new
+run beats it.
 
 **Headline: ~11,500-11,900 QPS of ECDSA signing at p99 < 2 ms**, with the two
 architectures agreeing to within 3.3%, and ~15,800-17,300 QPS for cached verification.
