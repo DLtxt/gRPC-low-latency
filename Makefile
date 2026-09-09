@@ -48,6 +48,19 @@ bench-tls: certs ## Same sweep with mTLS enabled, to price the security layer
 bench-baseline: ## Same sweep against the M2 single-session baseline
 	MODE=single ./scripts/bench-sweep.sh
 
+baseline: ## Go direct-PKCS#11 baseline: serial vs naive-concurrent vs pooled
+	@cd baseline && go build -o ../bin/baseline ./...
+	@SOFTHSM2_CONF=$(PWD)/.local/softhsm/softhsm2.conf \
+	 PKCS11_MODULE=$${PKCS11_MODULE:-/opt/homebrew/lib/softhsm/libsofthsm2.so} \
+	 TOKEN_LABEL=grpc-low-latency USER_PIN=$${USER_PIN:-1234} \
+	 ./scripts/run-baseline.sh
+
+records: ## Compare results against best_results.md and report what changed
+	@./scripts/render-results.py --check-records
+
+table: ## Print the current best figures as markdown
+	@./scripts/render-results.py --table
+
 ceiling: ## Measure the token's own parallel ceiling (no gRPC in the path)
 	SOFTHSM2_CONF=$(PWD)/.local/softhsm/softhsm2.conf \
 	PKCS11_MODULE=/opt/homebrew/lib/softhsm/libsofthsm2.so \
