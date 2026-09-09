@@ -88,7 +88,7 @@ error rate stay bounded", not "latency stays flat".
 
 ---
 
-## Token ceilings (raw PKCS#11, no gRPC in the path)
+## Token ceilings 
 
 The most the SoftHSM2 token itself can do, which bounds everything above.
 
