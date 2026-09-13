@@ -76,6 +76,14 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// Start the pool.
+    ///
+    /// **One pool per process.** `C_Initialize` and `C_Finalize` are process-global in
+    /// PKCS#11, so a second live `Pool` tears down the first one's module state. The
+    /// failure is not an error return: the surviving pool keeps using handles that
+    /// `C_Finalize` invalidated, and the process segfaults. The proxy binary creates
+    /// exactly one pool, and the integration tests serialise construction behind a
+    /// mutex for this reason.
     pub fn start(token: TokenConfig, config: PoolConfig) -> Result<Self, PoolError> {
         let (pkcs11, slot) = load_module(&token)
             .map_err(|e| PoolError::Internal(format!("failed to open token: {e:#}")))?;
