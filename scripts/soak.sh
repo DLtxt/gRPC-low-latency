@@ -139,7 +139,14 @@ summary = {
     "elapsed_seconds": int(elapsed),
     "requests_ok": len(ok),
     "requests_error": errors,
-    "achieved_rps": round(len(details) / float(elapsed), 1) if float(elapsed) else None,
+    # NOT derived from len(details): ghz caps the per-request detail array (it recorded
+    # 1,000,000 entries for a 57,600,000-request run), so dividing it by elapsed time
+    # understates the real rate by the truncation factor -- it reported 278 req/s for a
+    # run the server's own counter measured at 15,861 req/s. The detail array is still a
+    # valid latency *sample*; it is just not a count. True throughput has to come from
+    # the server's hsm_requests_total, which the sampler records.
+    "latency_sample_size": len(details),
+    "achieved_rps_note": "derive from hsm_requests_total in the samples CSV, not from the detail count",
     "latency": {
         "p50_ms": pct([x["latency"] for x in ok], 50),
         "p99_ms": pct([x["latency"] for x in ok], 99),
@@ -163,7 +170,8 @@ json.dump({"client_host": host, "soak": summary}, open(out_path, "w"), indent=2)
 
 print("\n-- soak summary --")
 print(f"  requests ok / error : {summary['requests_ok']:,} / {summary['requests_error']:,}")
-print(f"  achieved rate       : {summary['achieved_rps']} req/s")
+print(f"  latency sample      : {summary['latency_sample_size']:,} requests "
+      f"(ghz truncates; not a total)")
 lat = summary["latency"]
 for k in ("p50_ms", "p99_ms", "first_half_p99_ms", "second_half_p99_ms"):
     v = lat[k]
