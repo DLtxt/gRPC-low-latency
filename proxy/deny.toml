@@ -7,6 +7,25 @@
 [advisories]
 yanked = "deny"
 
+ignore = [
+    # RUSTSEC-2023-0071 -- "Marvin Attack", a timing sidechannel in the `rsa` crate that
+    # can leak a private key through variable-time PKCS#1 v1.5 *decryption*.
+    #
+    # Not reachable here. This crate never performs an RSA private-key operation: every
+    # signature and decryption happens inside the PKCS#11 token, and the private key is
+    # generated non-extractable so it cannot leave. The `rsa` crate is used in exactly
+    # three ways, all public-key only (see proxy/src/crypto.rs):
+    #
+    #   * RsaPublicKey::new()          -- build a public key from modulus and exponent
+    #   * Encode/DecodePublicKey       -- DER SubjectPublicKeyInfo round-trip
+    #   * RsaPublicKey::verify()       -- signature verification
+    #
+    # There is no fixed release: 0.9.x is all affected and the repair lands in 0.10.
+    # Re-evaluate when that ships, and re-check this justification if RSA decryption is
+    # ever added to the proxy rather than delegated to the token.
+    "RUSTSEC-2023-0071",
+]
+
 [licenses]
 allow = [
     "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
