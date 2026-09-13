@@ -26,3 +26,7 @@
 
 # Generated PINs -- never committed (plan.md section 9)
 /.env
+
+# proptest records failing cases here. Real findings should be committed; the ones
+# generated so far came from a bug in the test harness itself, not the product.
+proxy/tests/*.proptest-regressions

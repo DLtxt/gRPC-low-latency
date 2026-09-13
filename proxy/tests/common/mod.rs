@@ -8,6 +8,11 @@
 //! `SOFTHSM2_CONF` is read by the module when it loads and is process-global, so all
 //! tests in one binary share a single token directory and distinguish themselves by
 //! token label rather than by config file.
+//!
+//! This module is compiled into every integration-test binary, and no single binary uses
+//! all of it -- the pool tests need the serialisation guard, the property tests do not --
+//! so unused items here are expected rather than a sign of dead code.
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 use std::process::Command;
