@@ -6,7 +6,7 @@ The best numbers this project has achieved, with the conditions that produced th
 figures and update wherever one is beaten. A result only replaces an entry if it was
 measured under conditions at least as trustworthy — see [Ranking rules](#ranking-rules).
 
-Last updated: **2026-09-08** · commit `f9afbfd` · raw data in [`results/reference/`](results/reference/)
+Last updated: **2026-09-13** · commit `f9afbfd` · raw data in [`results/reference/`](results/reference/)
 
 ---
 
@@ -74,6 +74,31 @@ straining until it approaches capacity.
 2.3× range of offered load.** The service refuses excess rather than collapsing. The
 tail does degrade under sustained overload, so the load-shedding claim is "throughput and
 error rate stay bounded", not "latency stays flat".
+
+---
+
+## Sustained stability
+
+The longest clean run. A soak answers a different question from the sweeps — not how much
+throughput, but whether anything drifts over time.
+
+| Measure | Result |
+|---|---|
+| **Requests served** | **42,428,082** |
+| Sustained rate | 15,861 req/s over 2,675 s (~45 min) |
+| p50 / p99 | 0.291 ms / 0.694 ms |
+| p99, first half → second half | 0.710 ms → **0.677 ms** |
+| RSS, first → last | 38.46 MB → **35.98 MB** (−6.45%) |
+| RSS band | 34.25 – 43.10 MB |
+| Errors | **0** |
+| Session resets | **0** |
+
+Two `c7g.2xlarge`, ECDSA P-256 sign, 8 workers, plaintext. Memory ended *lower* than it
+started and the second half was marginally faster than the first, so neither a leak nor
+latency drift is present at this duration.
+
+Not yet covered: runs longer than an hour, and the mTLS and cached-verify paths. A leak
+that needs hours, or one specific to those paths, would not have shown here.
 
 ---
 
