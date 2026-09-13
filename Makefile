@@ -17,7 +17,18 @@ env: ## Generate .env with random PINs (idempotent)
 certs: ## Generate the local CA, server cert, and per-workload client certs
 	@./scripts/gen-certs.sh
 
-up: env certs ## Provision the token and run the proxy container
+up: env certs ## Provision the token and start the full stack (detached)
+	@$(COMPOSE) up --build -d
+	@echo
+	@echo "  stack is up."
+	@echo "    Grafana:     http://localhost:$${GRAFANA_PORT:-3000}   (dashboard is pre-loaded)"
+	@echo "    Prometheus:  http://localhost:$${PROMETHEUS_PORT:-9090}"
+	@echo "    gRPC:        localhost:$${PROXY_PORT:-50051}  (mTLS; client certs in ./certs)"
+	@echo
+	@echo "    make logs    follow the proxy"
+	@echo "    make down    stop"
+
+up-fg: env certs ## Same, but stay attached to the logs
 	$(COMPOSE) up --build
 
 down: ## Stop containers, keep the token volume

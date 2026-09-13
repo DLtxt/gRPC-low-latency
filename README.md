@@ -30,11 +30,12 @@ Do not reuse the demo PINs, certificates, or policy anywhere that matters.
 git clone https://github.com/DLtxt/gRPC-low-latency.git
 cd gRPC-low-latency
 make up          # generates PINs and certs, provisions the token, starts everything
-make dash        # opens Grafana
+                 # (detached -- it prints the URLs and returns your prompt)
 ```
 
 That brings up the proxy, Prometheus, and a provisioned Grafana dashboard with live data
-— no manual configuration. Then:
+— no manual configuration, and the first build takes a few minutes. Then send it a
+request:
 
 ```bash
 grpcurl -cacert certs/ca.crt -cert certs/payments.crt -key certs/payments.key \
@@ -45,7 +46,8 @@ grpcurl -cacert certs/ca.crt -cert certs/payments.crt -key certs/payments.key \
 
 | Command | What it does |
 |---|---|
-| `make up` | Full stack: proxy, Prometheus, Grafana |
+| `make up` | Full stack: proxy, Prometheus, Grafana (detached) |
+| `make logs` | Follow the proxy's logs |
 | `make bench` | Concurrency sweep; reports max QPS under the p99 budget |
 | `make baseline` | Go direct-PKCS#11 baseline, three modes |
 | `make ceiling` | The token's own limit, with no gRPC in the path |
