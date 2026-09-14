@@ -260,8 +260,20 @@ because SoftHSM2 is a software token.
 operation is authenticated, authorized, rate-limited, and observable, instead of N
 services each holding PKCS#11 credentials.
 
-Certificates and PINs are generated locally by `make certs` and `make env`, are
-gitignored, and have never been committed.
+### Running the stack
+
+- **The proxy runs unprivileged**, as `uid 10001`, with `softhsm` as its primary group.
+  The init container creates the token as root and hands the directory over; the proxy
+  never needs root, and the token lives in its address space.
+- **Published ports bind to loopback.** The metrics endpoint is unauthenticated by design
+  — so that scraping works while the service sheds load — and the demo Grafana is
+  configured for anonymous access so `docker compose up` needs no clicks. Both are safe
+  only because they are not reachable from the network. `BIND_ADDR=0.0.0.0` will publish
+  them; put authentication in front of Grafana first.
+- **PINs and certificates are generated locally** by `make env` and `make certs`, are
+  gitignored, and have never been committed. The demo PINs are random per install.
+- **Private keys are generated non-extractable** on the token (`CKA_SENSITIVE=true`,
+  `CKA_EXTRACTABLE=false`), which `token-check` verifies rather than assumes.
 
 ---
 

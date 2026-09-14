@@ -31,6 +31,17 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends softhsm2 \
  && rm -rf /var/lib/apt/lists/*
 
+# The token lives in this process's address space, so anything that compromises the
+# proxy already has the key material -- but it should not also start as root. The UID is
+# fixed and shared with softhsm-init, which chowns the token volume to it, because a
+# named user would otherwise resolve to different UIDs in the two images.
+# `softhsm` is the user's *primary* group, not a supplementary one. The Debian package
+# owns /var/lib/softhsm as root:softhsm mode 0770, so that group is required to reach
+# the token -- and Docker's USER directive sets uid and gid only, never loading
+# supplementary groups from /etc/group, so a secondary membership would be silently
+# dropped at runtime.
+RUN useradd --uid 10001 --gid softhsm --no-create-home --shell /usr/sbin/nologin hsm
+
 # Copied from /out rather than target/, because target/ is a cache mount and its
 # contents are not present in the layer once the RUN step ends.
 COPY --from=build /out/proxy /usr/local/bin/proxy
@@ -42,4 +53,5 @@ ENV PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so \
     RUST_LOG=info
 
 EXPOSE 50051
+USER 10001:999
 ENTRYPOINT ["/usr/local/bin/proxy"]

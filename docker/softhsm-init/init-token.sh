@@ -54,4 +54,14 @@ fi
 log "provisioning demo keys"
 provision 2>&1 | sed 's/^/[softhsm-init]   /'
 
+# Hand the token directory to the unprivileged UID the proxy runs as. This container
+# needs root to create the token; the proxy does not, and should not have it.
+HSM_UID="${HSM_UID:-10001}"
+# Group `softhsm` rather than a private group: the package owns /var/lib/softhsm as
+# root:softhsm 0770, so the proxy reaches the token through that group membership.
+HSM_GROUP="${HSM_GROUP:-softhsm}"
+log "transferring token ownership to ${HSM_UID}:${HSM_GROUP}"
+chown -R "${HSM_UID}:${HSM_GROUP}" "${TOKEN_DIR}"
+chmod -R g+rwX "${TOKEN_DIR}"
+
 log "provisioning complete"

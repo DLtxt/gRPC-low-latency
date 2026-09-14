@@ -45,9 +45,12 @@ services:
       # who can pull the image.
       - ./certs:/etc/grpc-low-latency/certs:ro
       - ./policy:/etc/grpc-low-latency/policy:ro
+    # Bound to loopback. Published on 0.0.0.0 these would expose an unauthenticated
+    # metrics endpoint, and a Grafana configured for anonymous admin, to the whole
+    # network. Set BIND_ADDR=0.0.0.0 deliberately if you want them reachable.
     ports:
-      - "${PROXY_PORT:-50051}:50051"
-      - "${METRICS_PORT:-9464}:9090"
+      - "${BIND_ADDR:-127.0.0.1}:${PROXY_PORT:-50051}:50051"
+      - "${BIND_ADDR:-127.0.0.1}:${METRICS_PORT:-9464}:9090"
     # token-check opens the token, exercises every demo key, and exits non-zero if
     # anything is wrong -- a far more useful signal than "the port is listening".
     healthcheck:
@@ -68,16 +71,16 @@ services:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
 
   grafana:
     image: grafana/grafana:latest
     depends_on:
       - prometheus
     environment:
-      # Anonymous admin access: this stack is a local demo, and a login prompt would
-      # break the "docker compose up, zero clicks" criterion in plan.md M7. Do not
-      # copy this into anything reachable from a network you do not control.
+      # Anonymous admin: this is a local demo and a login prompt would break the
+      # "docker compose up, zero clicks" criterion. Safe here only because the port is
+      # bound to loopback above -- if you change BIND_ADDR, put a password back first.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
@@ -89,7 +92,7 @@ services:
       - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "${GRAFANA_PORT:-3000}:3000"
+      - "${BIND_ADDR:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
 
 volumes:
   softhsm-tokens:
