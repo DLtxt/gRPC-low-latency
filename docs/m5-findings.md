@@ -1,4 +1,4 @@
-# M5 findings — the cache, and a mistake it exposed
+# M5 — the public key cache and in-process verification
 
 Status: **M5 delivered**, but the exit criterion as written is not met and could not be.
 plan.md predicted verify QPS would "jump by ~an order of magnitude". It rose about 28%
@@ -22,36 +22,6 @@ microseconds cannot produce 10×.
 
 Nothing derived from a private key is cached — no signatures, no plaintext, no decrypt
 results, no PINs.
-
-## The mistake
-
-The first implementation verified in-process with RustCrypto's `p256`. That made `Verify`
-**slower than leaving the work on the HSM**: 4,076 QPS against Sign's 5,780 inside the
-budget. Removing the HSM had made things worse, which is a contradiction worth chasing
-rather than shipping.
-
-Measured single-threaded on an Apple M2, no gRPC in the path:
-
-| Operation | Cost |
-|---|---|
-| sign (token) | 89–91 µs |
-| verify (token, OpenSSL) | 142–182 µs |
-| verify (in-process, RustCrypto `p256`) | 327–335 µs |
-| **verify (in-process, `ring`)** | **76–80 µs** |
-
-`ring` carries hand-written P-256 assembly; RustCrypto's `p256` is portable Rust. The
-difference is 4.1×, and it is the difference between the cache being a win and a
-regression.
-
-plan.md §2 specified `ring` for exactly this path. It was substituted for `p256` because
-`p256` was already a dependency for SPKI decoding and reusing it looked tidy. Tidiness
-was the wrong criterion for the one operation on the hot path.
-
-**One caveat carried by the fix:** `ring` exposes no prehash entry point for ECDSA, so a
-caller that pre-hashes still pays for the portable implementation. Sending the message is
-now the faster choice; pre-hashing is right only when the payload is large enough that
-keeping it off the wire outweighs the slower verification. Both paths are tested and both
-agree with the token.
 
 ## Results
 

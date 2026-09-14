@@ -25,6 +25,12 @@ CONCURRENCY="${CONCURRENCY:-200}"
 CONNECTIONS="${CONNECTIONS:-16}"
 METRICS_URL="${METRICS_URL:-}"   # e.g. http://10.0.1.5:9090/metrics
 LABEL="${LABEL:-soak}"
+# Set TLS=on to soak the mTLS path. Worth measuring separately: TLS adds per-record
+# encryption and framing to every request, and a leak in certificate or session handling
+# would only appear here.
+TLS="${TLS:-off}"
+CLIENT_IDENTITY="${CLIENT_IDENTITY:-payments}"
+SERVER_NAME="${SERVER_NAME:-localhost}"
 
 HOST_KIND="$(./scripts/host-info.sh | awk -F'"' '/host_kind/{print $4}')"
 OUT_DIR="results/${HOST_KIND}"
@@ -37,7 +43,7 @@ PAYLOAD="$(printf 'soak probe' | base64)"
 DATA="{\"key_label\":\"${KEY}\",\"mechanism\":\"${MECHANISM}\",\"input\":{\"message\":\"${PAYLOAD}\"}}"
 TOTAL=$(( RATE * DURATION_MIN * 60 ))
 
-echo "soak: ${RATE} req/s for ${DURATION_MIN} min against ${TARGET}"
+echo "soak: ${RATE} req/s for ${DURATION_MIN} min against ${TARGET} (tls=${TLS})"
 echo "      ${TOTAL} requests total, sampling every ${SAMPLE_SECS}s"
 echo
 
@@ -79,8 +85,17 @@ sample &
 SAMPLER_PID=$!
 trap 'kill "${SAMPLER_PID}" 2>/dev/null || true' EXIT
 
+if [ "${TLS}" = "on" ]; then
+    GHZ_TRANSPORT=(--cacert certs/ca.crt
+                   --cert "certs/${CLIENT_IDENTITY}.crt"
+                   --key "certs/${CLIENT_IDENTITY}.key"
+                   --cname "${SERVER_NAME}")
+else
+    GHZ_TRANSPORT=(--insecure)
+fi
+
 START_EPOCH=$(date -u +%s)
-ghz --insecure \
+ghz "${GHZ_TRANSPORT[@]}" \
     --proto proto/hsm/v1/hsm.proto --import-paths proto \
     --call hsm.v1.HsmService/Sign -d "${DATA}" \
     --rps "${RATE}" -c "${CONCURRENCY}" -n "${TOTAL}" \

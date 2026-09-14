@@ -1,4 +1,4 @@
-# M2 findings — the single-session baseline, measured through gRPC
+# M2 — the single-session baseline, measured through gRPC
 
 Status: **M2 exit criterion met.** `grpcurl` gets a real signature from the service, and
 `docker compose up` brings up a healthy proxy serving `hsm.v1.HsmService` end to end.

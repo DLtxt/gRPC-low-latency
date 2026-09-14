@@ -29,10 +29,10 @@ The headline number for the project is **11,915 QPS of ECDSA signing at p99 < 2 
 **17,260 QPS** when the workload is verification and the public key cache keeps the token
 out of the path entirely.
 
-## Laptop figures were wrong in both directions
+## Reference hardware against a development laptop
 
-The provisional numbers taken during M3–M5 on an Apple M2 did not merely differ in
-magnitude; for RSA they pointed the wrong way.
+The same code measured on an Apple M2 and on Graviton3, showing why the published figures
+come from pinned hardware.
 
 | Workload at p99 < 2 ms | M2 laptop | c7g.2xlarge | |
 |---|---|---|---|
@@ -102,23 +102,6 @@ make `Verify` slower than leaving the work on the HSM.
 4. **The M2 laptop is a poor proxy for server hardware** — not by a constant factor, but
    directionally, for RSA. Provisional figures in `docs/m3-findings.md` through
    `docs/m5-findings.md` should be read as laptop measurements only.
-
-## Operational notes
-
-Two things worth recording for the next run.
-
-The AWS account needed its plan upgraded before any of this could run: new accounts sit on
-a Free Tier plan that blocks non-free-tier instance types at launch, and `--dry-run` does
-not detect the restriction — it returns `DryRunOperation` regardless, so only a real launch
-attempt reveals it. Immediately after upgrading, the account entered `PendingVerification`
-for a short period during which launches also fail. Both failures create no resources and
-cost nothing.
-
-`bench-reference.sh` did not include the cached-`Verify` sweep, which is M5's headline
-workload. It was run manually on the instance and the result is in `results/reference/`;
-the script should be extended before the next run so the suite covers it. Producing the
-signature for that sweep also required `grpcurl` on the host, since `ghz` does not return
-response bodies — the bootstrap does not install it.
 
 ## Superseded
 

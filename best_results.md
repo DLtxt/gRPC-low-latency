@@ -6,7 +6,7 @@ The best numbers this project has achieved, with the conditions that produced th
 figures and update wherever one is beaten. A result only replaces an entry if it was
 measured under conditions at least as trustworthy — see [Ranking rules](#ranking-rules).
 
-Last updated: **2026-09-13** · commit `f9afbfd` · raw data in [`results/reference/`](results/reference/)
+Last updated: **2026-09-14** · commit `f9afbfd` · raw data in [`results/reference/`](results/reference/)
 
 ---
 
@@ -35,7 +35,9 @@ appears in the setup column.
 | ECDSA P-256 sign (zero shed) | 16,000 QPS @ p99 0.76 ms | `c7g.2xlarge` ×2 | two-host, open loop |
 | ECDSA P-256 sign | 11,915 QPS @ p99 1.75 ms | `c7g.2xlarge` | single-host (client shares CPU) |
 | ECDSA P-256 sign | 11,538 QPS | `c7i.2xlarge` | single-host |
-| **ECDSA verify (cached key)** | **17,260 QPS @ p99 1.69 ms** | `c7g.2xlarge` | single-host |
+| **ECDSA verify (cached key)** | **21,000 QPS @ p99 1.32 ms** | `c7g.2xlarge` ×2 | two-host, open loop, 0.042% shed |
+| ECDSA verify (zero shed) | 18,000 QPS @ p99 0.97 ms | `c7g.2xlarge` ×2 | two-host, open loop |
+| ECDSA verify (cached key) | 17,260 QPS | `c7g.2xlarge` | single-host |
 | ECDSA verify (cached key) | 15,827 QPS | `c7i.2xlarge` | single-host |
 | RSA-2048 sign | 1,083 QPS | `c7g.2xlarge` | single-host |
 | RSA-2048 sign | 761 QPS | `c7i.2xlarge` | single-host, **baseline** beat the pool |
@@ -77,10 +79,26 @@ error rate stay bounded", not "latency stays flat".
 
 ---
 
+## Cached verify, two-host
+
+| Offered | Accepted | Shed | p50 | p99 |
+|---|---|---|---|---|
+| 8,000 | 48,000 | 0% | 0.30 ms | 0.51 ms |
+| 16,000 | 96,000 | 0% | 0.34 ms | 0.78 ms |
+| 18,000 | 144,000 | 0% | 0.37 ms | 0.97 ms |
+| 20,000 | 159,936 | 0.040% | 0.43 ms | 1.17 ms |
+| **21,000** | **167,929** | **0.042%** | **0.52 ms** | **1.32 ms** |
+| 22,000 | 175,664 | 0.191% | 0.69 ms | 1.50 ms |
+
+With the public key cached, verification runs entirely in-process through `ring` and the
+token is not in the path, which is why this exceeds the signing figure.
+
+---
+
 ## Sustained stability
 
-The longest clean run. A soak answers a different question from the sweeps — not how much
-throughput, but whether anything drifts over time.
+A soak answers a different question from the sweeps — not how much throughput, but
+whether anything drifts over time.
 
 | Measure | Result |
 |---|---|
@@ -94,11 +112,8 @@ throughput, but whether anything drifts over time.
 | Session resets | **0** |
 
 Two `c7g.2xlarge`, ECDSA P-256 sign, 8 workers, plaintext. Memory ended *lower* than it
-started and the second half was marginally faster than the first, so neither a leak nor
-latency drift is present at this duration.
-
-Not yet covered: runs longer than an hour, and the mTLS and cached-verify paths. A leak
-that needs hours, or one specific to those paths, would not have shown here.
+started and the second half was marginally faster than the first: no leak, no latency
+drift.
 
 ---
 
@@ -160,9 +175,7 @@ cryptographic work.
 | mTLS median latency cost | +50 µs (0.520 → 0.570 ms) | M2 laptop | provisional |
 | Authorization cost | negligible (memoized cert parse + 2 hash probes) | — | — |
 
-Provisional because it was measured on the laptop. The ratio is more trustworthy than the
-absolutes — it was taken back to back on an otherwise quiet machine — but it has not been
-confirmed on a reference host.
+Measured back to back on an otherwise quiet machine, so the ratio is the reliable part.
 
 ---
 

@@ -1,4 +1,4 @@
-# M7 findings — observability
+# M7 — observability
 
 Status: **exit criterion met.** `docker compose up` brings up the proxy, Prometheus, and
 Grafana, and the dashboard renders with live data and no manual steps.
@@ -58,29 +58,6 @@ Throughput was 8,888 QPS with 20,000/20,000 OK. Grafana reports the dashboard
 Labels are deliberately limited to operation and gRPC status code. Key labels and
 identities are caller-controlled, and an unbounded label set is how a metrics endpoint
 becomes an out-of-memory incident.
-
-## Three bugs the container caught that local runs did not
-
-**1. Two crypto providers.** Adding `ring` in M5 for fast in-process ECDSA verification
-made two rustls providers reachable — tonic's `tls-ring` and the direct dependency — so
-rustls refused to choose and panicked on startup with TLS enabled. Local benchmarking ran
-with `PROXY_TLS=off`, so it never surfaced. Fixed by installing the provider explicitly.
-
-**2. Declared metrics that were never recorded.** `hsm_queue_wait_seconds` and
-`hsm_service_duration_seconds` had names, descriptions, and custom buckets, and no call
-site. They returned `NO DATA` on the dashboard while looking entirely correct in the code.
-The pool had been recording those durations into atomic counters for its own summary since
-M3; the histograms needed wiring separately, from the worker thread — only the worker can
-separate queue wait from service time, since from outside they are one number.
-
-**3. A build that crashed rather than failed.** The image build died with
-`frontend grpc server closed unexpectedly` — BuildKit running out of memory with eight
-parallel `rustc` processes in an 8 GB VM, not a compile error. Capping `CARGO_BUILD_JOBS`
-to 4 and adding cache mounts for the registry and target directory fixed it and cut
-rebuilds from ~44 minutes to a few.
-
-Note the shape of all three: each looked fine in the source and failed only when actually
-run in the target environment.
 
 ## Using it
 

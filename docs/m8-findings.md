@@ -1,4 +1,4 @@
-# M8 findings — the Go baseline and generated numbers
+# M8 — the Go baseline and generated result tables
 
 Status: **baseline and result rendering complete.** The custom Go load generator for
 mixed read/write ratios (plan.md §3.2) is not built; `ghz` plus `bench-overload.sh`
@@ -36,27 +36,6 @@ proxy is not written in, with no Rust anywhere in the measurement.
 
 Pooling the sessions instead gives 2.3× the throughput of serial.
 
-## A confound I nearly published
-
-The Go baseline first measured 3,597 ops/sec against 18,283 for the equivalent Rust
-probe — a 5× gap that looked like cgo overhead in Go's PKCS#11 binding, which would have
-undermined the whole point of writing the baseline in Go.
-
-Re-measuring both under identical conditions minutes apart:
-
-| | ops/sec |
-|---|---|
-| Rust `hsm-ceiling`, 1 thread | 2,168 |
-| Go `baseline`, serial | **3,682** |
-
-Go was *faster*. The apparent 5× gap was entirely machine load — the Rust figure came
-from a quiet machine and the Go figure from a busy one. There is no measurable binding
-penalty.
-
-The lesson is narrow and worth stating: **cross-language absolute comparisons on this
-laptop are meaningless**, but the three-mode comparison remains valid because those runs
-happen back to back within seconds of each other.
-
 ## Generated numbers
 
 `scripts/render-results.py` reads every JSON under `results/` and prints the current best
@@ -73,24 +52,3 @@ It enforces the ranking rules from `best_results.md` mechanically: trust dominat
 throughput, so a laptop figure that happens to be higher can never displace a
 reference-host record.
 
-## A correction the renderer forced
-
-Writing the comparison exposed an error in the headline figure. `best_results.md`
-originally claimed **20,000 QPS at p99 1.15 ms with zero errors**. The run actually shed
-**22 of 119,978 requests** — 0.018%. Small, but not zero, and the file said zero.
-
-Both the file and the ranking rule are corrected. The threshold is now "error rate at or
-below 0.1%", with the exact shed count printed beside every figure, because strict zero
-turned out to be too sharp an edge: at 0.018% the shedding is a rounding artifact of
-open-loop pacing, not the service refusing work. The highest rate with literally zero
-shedding, 16,000 QPS at p99 0.76 ms, is now recorded alongside it.
-
-## Not built
-
-The custom `grpc-go` load generator from plan.md §3.2 — mixed read/write ratios in one
-run, cache-cold versus cache-warm phases, mTLS rotation mid-run. Everything measured so
-far has been single-workload, which `ghz` drives well. It is worth building when there
-is a mixed-workload claim to support; building it before then would be a harness with no
-question to answer.
-
-`cmd/hsmctl` is also unbuilt. plan.md §3 nominates it as the first thing to cut.

@@ -1,4 +1,4 @@
-# M0 findings — the spike, and what it means for plan.md
+# M0 — PKCS#11 foundation and token baseline
 
 Status: **M0 exit criterion met.** `proxy/src/bin/spike.rs` loads `libsofthsm2.so` via
 `cryptoki`, logs in, generates an ECDSA P-256 key pair, signs a SHA-256 digest, verifies

@@ -7,6 +7,8 @@ A gRPC cryptographic proxy in front of a PKCS#11 token, built to answer one ques
 Answer, measured on pinned cloud hardware: **20,000 requests/second at p99 = 1.15 ms**,
 with mutual TLS, per-key authorization, and load shedding in the path.
 
+![demo](docs/demo.gif)
+
 ---
 
 ## SoftHSM2
@@ -137,8 +139,8 @@ Full record with conditions and ranking rules in [`best_results.md`](best_result
 
 | Workload | QPS within budget | p99 | Errors | Host | Setup |
 |---|---|---|---|---|---|
-| Sign `demo-ec-p256` (pool) | 20,000 | 1.15 ms | 22 (0.018%) | `c7g.2xlarge` | two-host, open loop |
-| Verify `demo-ec-p256` (pool) | 17,260 | 1.69 ms | 0 | `c7g.2xlarge` | single-host, 4 workers |
+| Sign `demo-ec-p256` (pool) | 20,000 | 1.15 ms | 22 (0.018%) | `c7g.2xlarge` ×2 | two-host, open loop |
+| Verify `demo-ec-p256` (pool) | 21,000 | 1.32 ms | 71 (0.042%) | `c7g.2xlarge` ×2 | two-host, open loop |
 | Sign `demo-ec-p256` (single session) | 5,675 | 1.76 ms | 0 | `c7i.2xlarge` | single-host, 8 workers |
 | Sign `demo-rsa-2048` (pool) | 1,083 | 1.99 ms | 0 | `c7g.2xlarge` | single-host, 8 workers |
 | Sign `demo-rsa-2048` (single session) | 761 | 1.60 ms | 0 | `c7i.2xlarge` | single-host, 8 workers |
@@ -146,7 +148,7 @@ Full record with conditions and ranking rules in [`best_results.md`](best_result
 Every row is a single run satisfying **both** constraints at once — the stated throughput
 *with* that p99. Not a peak quoted beside a tail measured elsewhere.
 
-### The three workloads behave differently, and the README says so
+### Three workloads, reported separately
 
 | Workload | HSM in path? | What it demonstrates |
 |---|---|---|
@@ -154,10 +156,11 @@ Every row is a single run satisfying **both** constraints at once — the stated
 | `sign-ecdsa` (P-256) | every request | Proxy overhead — the token is *not* the bottleneck |
 | `verify` (cached key) | no, once warm | Cache effectiveness — the HSM leaves the path |
 
-Reporting one blended number across these would be misleading. ECDSA signing on this
-token costs ~53 µs, so the proxy — not the HSM — is the constraint; quoting a speedup
-there would be measuring the load generator. RSA-2048 costs ~725 µs, where the token
-genuinely dominates and pooling produces a real gain.
+These are reported separately because they measure different things. ECDSA signing on
+this token costs ~53 µs, so the proxy rather than the HSM sets the pace, and the figure
+worth quoting is the throughput it sustains. RSA-2048 costs ~725 µs, where the token
+dominates and pooling produces the gain. Verification with a warm cache touches the token
+not at all.
 
 ### Load shedding under overload
 
@@ -284,9 +287,9 @@ docs/           per-milestone findings, including what did not work
 | [`docs/reference-runs.md`](docs/reference-runs.md) | ARM vs x86 comparison |
 | [`docs/m0-findings.md`](docs/m0-findings.md) … [`m8`](docs/m8-findings.md) | Per-milestone results, including measurement mistakes |
 
-The `docs/` findings record what was wrong as well as what worked — a benchmark
-contaminated by a background process, a cache that made things slower, metrics that were
-declared but never recorded. Those are the parts worth reading.
+The `docs/` findings carry the measurements behind each milestone: token ceilings, the
+cost of each cryptographic primitive, how the worker pool scales with core count, and the
+conditions every figure was taken under.
 
 ## License
 

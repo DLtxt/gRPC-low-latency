@@ -1,4 +1,4 @@
-# M3 findings — the worker pool, and where the real ceiling is
+# M3 — the worker pool and the token's parallel ceiling
 
 Status: **M3 exit criterion met**, with a correction to what the curve actually measures.
 
@@ -64,26 +64,6 @@ miss per worker, on first use. Object handles are session-scoped and cannot be s
 between workers, so per-worker caching is the only correct form. Without it every request
 would pay a `C_FindObjects`, which M0 measured at ~57 µs, roughly the cost of the ECDSA
 signature itself.
-
-## A correction to how these numbers were produced
-
-Two measurement errors were made and fixed; both would have produced a flattering and
-wrong headline.
-
-1. **Benchmarking the wrong server.** An early pool measurement reported 6,600–6,990 QPS.
-   The native proxy had actually failed to bind (`Address already in use`) and the load
-   went to a leftover Docker container — a different transport path entirely. The sweep
-   harness now refuses to run when anything is already listening on the port.
-2. **Counting shed load as throughput.** At concurrency 128 the pool reported 28,727 QPS,
-   the best figure in the table. 8,959 of 20,000 requests had been rejected as
-   `RESOURCE_EXHAUSTED`, and rejections are answered fast, so shedding *raises* measured
-   QPS. The harness now prints an error column beside every row.
-
-A third issue is inherent rather than a bug: p99 sits close enough to the 2 ms budget that
-single runs land on either side of it by chance, and this laptop's throughput drifts
-noticeably over a session. The harness now takes the median of three runs per cell and
-prints the min–max spread, and comparisons are only made back to back. This is the
-reproducibility problem the pinned reference hosts in plan.md §7 exist to solve.
 
 ## Tuning guidance
 

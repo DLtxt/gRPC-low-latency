@@ -1,4 +1,4 @@
-# M4 findings — what mTLS and authorization cost
+# M4 — the cost of mTLS and authorization
 
 Status: **M4 exit criterion met.** Three client certificates, one denied for
 `demo-rsa-2048`, with the counter incrementing.

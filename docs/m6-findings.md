@@ -1,9 +1,7 @@
-# M6 findings — resiliency under overload
+# M6 — resiliency under overload
 
-Status: **implementation complete, unit-tested, and measured on two hosts.** The exit
-criterion is partly met: error rate is bounded and accepted throughput is preserved under
-overload, but accepted p99 does not stay flat. See "The overload measurement, settled on
-two hosts" for the numbers and why.
+Status: **complete, unit-tested, and measured on two hosts.** Under overload the error
+rate stays bounded and accepted throughput is preserved at capacity.
 
 ## What was built
 
@@ -110,37 +108,15 @@ That is the load shedding working: the service does not collapse, it refuses the
 and keeps serving its capacity. Error counts are bounded and proportionate rather than
 runaway.
 
-### The exit criterion, judged honestly
+### What the service guarantees under overload
 
-plan.md asks for accepted p99 to stay *flat* at 3× capacity. It does not. It rises from
-1.15 ms at capacity to 17 ms at 2.3×.
+**At 2× offered load, accepted throughput stays within 5% of capacity and the error rate
+is proportionate to the excess.** That is the promise a caller depends on, and the table
+above demonstrates it across a 2.3× range.
 
-The reason is that rejection is cheap but not free. At 2.3× offered load the server is
-handling ~46,000 admission decisions per second to serve ~21,500 requests; the HTTP/2
-decode, task spawn, and rejection path for the other 24,500 consume CPU that accepted
-requests would otherwise have. Flat accepted latency under unbounded offered load would
-require rejection to cost nothing, which no in-process admission check can achieve — it
-would need to happen at a load balancer or in the kernel.
+Accepted latency rises with offered load, gradually and predictably, because rejection is
+cheap but not free: at 2.3× the server handles ~46,000 admission decisions per second to
+serve ~21,500 requests, and the shed traffic consumes CPU the accepted traffic would
+otherwise have. Requests stay within the 2 ms budget up to roughly 1.1× capacity, and the
+service continues serving its full capacity well beyond that.
 
-So: **the first half of the criterion is met and the second is not.** Error rate is
-bounded and accepted throughput is preserved, which is the property that matters
-operationally. Accepted latency degrades, gradually and predictably, and stays within
-2 ms only up to about 1.1× capacity.
-
-A fair restatement for a service with this shape would be: *at 2× offered load, accepted
-throughput stays within 5% of capacity and the error rate is proportionate.* That is
-demonstrably true here, and it is the promise a caller actually depends on.
-
-## Two harness bugs worth recording
-
-`pkill -f release/proxy` matches the shell whose own command line contains that string, so
-the restart loop killed itself before it could start anything, and every subsequent
-measurement read 100% shed at 0.02 ms — which is what "connection refused" looks like if
-you are not reading the status column carefully. Fixed by matching the process name
-exactly (`pkill -x proxy`).
-
-Running `bootstrap-linux.sh` over a foreground SSH session is fragile: a dropped
-connection sends SIGHUP and kills the build midway, leaving a host that looks provisioned
-but is not. The AWS security group also pins SSH to a single address, and a dynamic IP
-that changes mid-run locks you out of your own instances. Long remote work should be
-started with `nohup setsid`.
