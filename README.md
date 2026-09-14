@@ -294,6 +294,7 @@ docs/           per-milestone findings, including what did not work
 
 | Document | Contents |
 |---|---|
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Repository conventions and the traps they prevent |
 | [`best_results.md`](best_results.md) | Peak figures with conditions and ranking rules |
 | [`plan.md`](plan.md) | The original design, with measured corrections in place |
 | [`docs/reference-runs.md`](docs/reference-runs.md) | ARM vs x86 comparison |

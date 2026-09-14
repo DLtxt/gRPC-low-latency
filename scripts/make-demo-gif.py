@@ -18,6 +18,11 @@ import pathlib
 
 from PIL import Image, ImageDraw, ImageFont
 
+# Anchor to the repository root so the default output path does not depend on the
+# caller's working directory. Run from proxy/, a relative default would write
+# proxy/docs/demo.gif and the README's image would silently stay stale.
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
 # --- appearance ---------------------------------------------------------------------
 W, H = 920, 560
 PAD = 22
@@ -182,6 +187,6 @@ def build(out_path: pathlib.Path) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("-o", "--out", default="docs/demo.gif", type=pathlib.Path)
+    ap.add_argument("-o", "--out", default=REPO / "docs/demo.gif", type=pathlib.Path)
     args = ap.parse_args()
     build(args.out)

@@ -6,7 +6,11 @@
 # so PINs stay stable across runs (regenerating them would orphan the token).
 set -eu
 
-ENV_FILE="${1:-.env}"
+# Anchor to the repository root. Without this the default .env lands in whatever
+# directory the caller happens to be in, so `cd proxy && ../scripts/gen-env.sh` silently
+# creates proxy/.env and compose then reports the PINs as unset.
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+ENV_FILE="${1:-${REPO}/.env}"
 
 if [ -f "${ENV_FILE}" ]; then
     echo "${ENV_FILE} already exists; leaving it alone"

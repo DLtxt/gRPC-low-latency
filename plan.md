@@ -298,7 +298,7 @@ gRPC-low-latency/
 ├── deploy/
 │   ├── prometheus/prometheus.yml
 │   └── grafana/provisioning/{datasources,dashboards}/
-├── scripts/gen-certs.sh
+├── scripts/gen-certs.sh        # all scripts anchor to the repo root; see CONTRIBUTING.md
 ├── policy/authz.toml
 └── .github/workflows/ci.yml
 ```
