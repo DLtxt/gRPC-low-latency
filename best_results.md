@@ -115,6 +115,20 @@ Two `c7g.2xlarge`, ECDSA P-256 sign, 8 workers, plaintext. Memory ended *lower* 
 started and the second half was marginally faster than the first: no leak, no latency
 drift.
 
+### The same under mTLS
+
+| Measure | Result |
+|---|---|
+| Sustained rate | 13,925 req/s for 1,186 s, mutual TLS throughout |
+| p50 / p99 | 0.316 ms / 0.656 ms |
+| p99, first half → second half | 0.648 ms → 0.663 ms |
+| RSS, mean first half → second half | 35.9 MB → 36.9 MB |
+| Errors | 6 of 1,000,000 sampled (0.0006%) |
+| Session resets | 0 |
+
+The encrypted path behaves like the plaintext one: memory settles after the allocator
+warms and stays flat, and p99 is unchanged across the halves.
+
 ---
 
 ## Speedups over the naive baseline
@@ -171,8 +185,9 @@ cryptographic work.
 
 | Measurement | Value | Host | Status |
 |---|---|---|---|
-| mTLS throughput cost | −13% (5,909 → 5,143 QPS) | M2 laptop | provisional |
-| mTLS median latency cost | +50 µs (0.520 → 0.570 ms) | M2 laptop | provisional |
+| mTLS sustained throughput | 13,925 req/s at p99 0.656 ms | `c7g.2xlarge` ×2 | measured |
+| mTLS throughput cost | −13% (5,909 → 5,143 QPS) | M2 laptop | ratio |
+| mTLS median latency cost | +50 µs (0.520 → 0.570 ms) | M2 laptop | ratio |
 | Authorization cost | negligible (memoized cert parse + 2 hash probes) | — | — |
 
 Measured back to back on an otherwise quiet machine, so the ratio is the reliable part.

@@ -1,4 +1,4 @@
-# Soak — 42.4 million requests at 15,861 req/s
+# Soak — sustained load, plaintext and mTLS
 
 Status: **clean.** No memory growth, no latency drift, no session churn, zero errors.
 
@@ -48,3 +48,20 @@ a single aggregate cannot distinguish a steady 0.7 ms from 0.5 ms drifting to 2 
 The 5,243 minimum is a single sampling interval at startup, before the rate stabilised;
 every other interval sat within a few percent of the 16,000 target.
 
+## The same run under mTLS
+
+A second soak with mutual TLS enabled end to end, `payments` client identity:
+
+| | |
+|---|---|
+| Sustained rate | 13,925 req/s for 1,186 s |
+| p50 / p99 | 0.316 ms / 0.656 ms |
+| p99, first half → second half | 0.648 ms → 0.663 ms |
+| RSS, mean first half → second half | 35.9 MB → 36.9 MB |
+| Errors | 6 of 1,000,000 sampled |
+| Session resets | 0 |
+
+RSS climbs for the first minute or so as the allocator and connection pools warm, then
+settles: the mean over the second half is within a megabyte of the first. The encrypted
+path holds the same p99 across both halves as the plaintext one, so TLS record handling
+adds cost per request without accumulating state.
