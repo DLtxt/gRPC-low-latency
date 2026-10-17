@@ -96,6 +96,38 @@ Every row shows an **errors** column. Treat any row with a non-zero count as voi
 requests are answered fast, so a run that rejects most of its load reports a *higher* QPS
 than one that serves it.
 
+### Two-host overload, with security on
+
+Capacity and overload figures need two hosts (proxy on one, load generator on the
+other), and they need the secured path: with `PROXY_TLS=off` the proxy runs with no mTLS
+and no authorization policy, and the rate limiter has no identity to key on. A plaintext
+figure does not describe the proxy as deployed. Both hosts need `certs/`, which the
+`rsync` above copies, and the security group must allow port 50051 between them.
+
+On the proxy host:
+
+```bash
+# The rate limit is per identity and the benchmark drives one identity, so a limit
+# below capacity would make the limiter, not the queue, do the shedding. Set above
+# capacity, it is checked on every request without ever binding.
+PROXY_TLS=on RATE_LIMIT_PER_SECOND=100000 ./scripts/run-server.sh
+```
+
+On the load-generator host, against the proxy's private address:
+
+```bash
+TARGET=PROXY_PRIVATE_IP:50051 TLS=on DURATION=6 \
+  RATES="4000 8000 12000 16000 18000 20000 22000 25000 30000 40000 46000" \
+  ./scripts/bench-overload.sh
+```
+
+Each row's `rejections` field shows which mechanism refused the requests: `queue_full`
+is load shedding, `rate_limited` means the limit was set too low for the run, and
+`PermissionDenied` means the client identity is not granted `sign` in
+`policy/authz.toml`. Quote `accepted_rps` for throughput under overload, not
+`accepted / DURATION`, which overstates it whenever the client falls short of the
+offered rate.
+
 ---
 
 ## 4. Collect the results

@@ -24,5 +24,6 @@ if [ -f ./.env ]; then
     set -a; . ./.env; set +a
 fi
 
-echo "[server] workers=${HSM_WORKERS} queue_depth=${HSM_QUEUE_DEPTH} tls=${PROXY_TLS}"
+echo "[server] workers=${HSM_WORKERS} queue_depth=${HSM_QUEUE_DEPTH} tls=${PROXY_TLS}" \
+     "rate_limit=${RATE_LIMIT_PER_SECOND:-off}"
 exec ./proxy/target/release/proxy

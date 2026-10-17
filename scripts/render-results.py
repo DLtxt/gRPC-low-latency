@@ -106,13 +106,17 @@ def to_records(results: list[dict]) -> list[Record]:
                 continue
             best = max(rows, key=lambda r: r["offered_rps"])
             host = d.get("client_host", {}).get("instance_type", "unknown")
+            # Files written before the tls field existed were all plaintext. A secured
+            # run is its own workload: ranked against a plaintext one it would always
+            # lose, and the faster number would go on describing the slower path.
+            secured = run.get("tls", "off") != "off"
             records.append(Record(
-                workload=f"Sign {run.get('key_label','?')} (pool)",
+                workload=f"Sign {run.get('key_label','?')} (pool{', mTLS' if secured else ''})",
                 qps=float(best["offered_rps"]),
                 p99_ms=best.get("accepted_p99_ms"),
                 host=host,
                 trust="two-host-reference" if host.startswith("c7") else "local",
-                setup="two-host, open loop",
+                setup="two-host, open loop, " + ("mTLS + authz" if secured else "plaintext"),
                 errors=best.get("shed", 0),
                 served=best.get("accepted", 0),
                 source=d["_path"],
