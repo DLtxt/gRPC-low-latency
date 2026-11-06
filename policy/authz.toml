@@ -10,11 +10,14 @@
 
 [[workloads]]
 identity = "spiffe://local/ns/default/sa/payments"
-description = "Payment service. Signs with both key pairs and uses the AES key."
+description = "Payment service. Signs with both key pairs, uses the AES key, and requests withdrawals."
 grants = [
     { key_label = "demo-ec-p256",  operations = ["sign", "verify", "get_public_key"] },
     { key_label = "demo-rsa-2048", operations = ["sign", "verify", "get_public_key"] },
     { key_label = "demo-aes-256",  operations = ["encrypt", "decrypt"] },
+    # A transfer key: sign_transfer, never sign. The proxy refuses to load a policy
+    # granting `sign` on a key in policy/transfers.toml.
+    { key_label = "demo-hot-wallet", operations = ["sign_transfer", "verify", "get_public_key"] },
 ]
 
 [[workloads]]
@@ -33,4 +36,15 @@ identity = "spiffe://local/ns/default/sa/batch"
 description = "Batch jobs. EC signing only; no access to the RSA key or the AES key."
 grants = [
     { key_label = "demo-ec-p256", operations = ["sign", "verify", "get_public_key"] },
+]
+
+# Relays approvals for held transfers. It cannot approve anything itself -- an approval
+# is a signature by an approver's own key, checked against certs/approvers/ -- and it
+# cannot request transfers: the proxy refuses to load a policy giving one identity both
+# sign_transfer and approve_transfer on the same key.
+[[workloads]]
+identity = "spiffe://local/ns/default/sa/treasury"
+description = "Treasury console. Shows held transfers to approvers and relays their approvals."
+grants = [
+    { key_label = "demo-hot-wallet", operations = ["approve_transfer", "get_public_key"] },
 ]

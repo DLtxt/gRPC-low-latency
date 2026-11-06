@@ -46,6 +46,20 @@ pub enum JobRequest {
     GetPublicKey {
         key_label: String,
     },
+    /// Sign the SHA-256 digest of a canonical transfer with a transfer-only key.
+    ///
+    /// Separate from `Sign` so the worker can tell the two apart: `Sign` is refused on
+    /// a key marked transfer-only, and this is refused on any key that is not. Only the
+    /// transfer path constructs it, after the guard has checked the transfer.
+    SignTransfer {
+        key_label: String,
+        digest: [u8; 32],
+    },
+    /// Report whether a key is marked transfer-only, so the server can check at startup
+    /// that the transfer policy and the token agree.
+    DescribeKey {
+        key_label: String,
+    },
 }
 
 impl JobRequest {
@@ -57,6 +71,8 @@ impl JobRequest {
             JobRequest::Encrypt { .. } => "encrypt",
             JobRequest::Decrypt { .. } => "decrypt",
             JobRequest::GetPublicKey { .. } => "get_public_key",
+            JobRequest::SignTransfer { .. } => "sign_transfer",
+            JobRequest::DescribeKey { .. } => "describe_key",
         }
     }
 }
@@ -71,6 +87,9 @@ pub enum JobResponse {
     PublicKey {
         spki_der: Vec<u8>,
         key_type: String,
+    },
+    KeyDescription {
+        transfer_only: bool,
     },
 }
 

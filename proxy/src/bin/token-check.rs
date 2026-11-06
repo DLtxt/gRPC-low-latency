@@ -9,12 +9,15 @@ use anyhow::{anyhow, Context, Result};
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, AttributeType, ObjectClass};
 use cryptoki::session::Session;
-use grpc_low_latency_proxy::pkcs11::{find_object, find_object_pair, open_token, TokenConfig};
+use grpc_low_latency_proxy::pkcs11::{
+    find_object, find_object_pair, is_transfer_only, open_token, TokenConfig,
+};
 use sha2::{Digest, Sha256};
 
 /// Keys that `docker/softhsm-init/init-token.sh` is contracted to provision.
 const EXPECTED_KEYPAIRS: &[&str] = &["demo-ec-p256", "demo-rsa-2048"];
 const EXPECTED_SECRET_KEYS: &[&str] = &["demo-aes-256"];
+const EXPECTED_TRANSFER_KEYS: &[&str] = &["demo-hot-wallet"];
 
 fn main() -> Result<()> {
     let config = TokenConfig::from_env()?;
@@ -38,6 +41,16 @@ fn main() -> Result<()> {
             Ok(note) => println!("keypair     : {label} -> {note}"),
             Err(err) => {
                 println!("keypair     : {label} -> FAILED: {err:#}");
+                failures.push(format!("{label}: {err:#}"));
+            }
+        }
+    }
+
+    for label in EXPECTED_TRANSFER_KEYS {
+        match check_transfer_key(&session, label) {
+            Ok(note) => println!("transfer key: {label} -> {note}"),
+            Err(err) => {
+                println!("transfer key: {label} -> FAILED: {err:#}");
                 failures.push(format!("{label}: {err:#}"));
             }
         }
@@ -77,33 +90,31 @@ fn main() -> Result<()> {
     }
 }
 
+/// Confirm a transfer key pair exists, is protected, and carries the transfer-only
+/// marker. An unmarked key under this label would make the proxy refuse transfers and
+/// leave a blind signer behind, so the marker is the point of the check.
+///
+/// Not test-signed, unlike the other key pairs: the one thing a transfer key must never
+/// do is sign something that is not a transfer, and a health check is no exception.
+/// The transfer demo exercises it end to end instead.
+fn check_transfer_key(session: &Session, label: &str) -> Result<String> {
+    let (private_key, _) = find_object_pair(session, label)?
+        .ok_or_else(|| anyhow!("key pair not found; did softhsm-init run?"))?;
+    check_protection(session, private_key)?;
+    if !is_transfer_only(session, private_key)? {
+        return Err(anyhow!(
+            "private key is not marked transfer-only (CKA_ID); destroy it and provision again"
+        ));
+    }
+    Ok("sensitive, non-extractable, marked transfer-only".to_string())
+}
+
 /// Confirm a key pair exists, that the private key is properly protected, and that it
 /// can actually sign.
 fn check_keypair(session: &Session, label: &str) -> Result<String> {
     let (private_key, public_key) = find_object_pair(session, label)?
         .ok_or_else(|| anyhow!("key pair not found; did softhsm-init run?"))?;
-
-    // The whole premise of an HSM is that the private key cannot be read out. If
-    // provisioning got this wrong the project's security story is void, so check it
-    // rather than trusting the provisioning script.
-    let attrs = session
-        .get_attributes(
-            private_key,
-            &[AttributeType::Sensitive, AttributeType::Extractable],
-        )
-        .context("C_GetAttributeValue failed")?;
-
-    for attr in &attrs {
-        match attr {
-            Attribute::Sensitive(false) => {
-                return Err(anyhow!("private key is CKA_SENSITIVE=false"))
-            }
-            Attribute::Extractable(true) => {
-                return Err(anyhow!("private key is CKA_EXTRACTABLE=true"))
-            }
-            _ => {}
-        }
-    }
+    check_protection(session, private_key)?;
 
     // Sign and verify, so "the key exists" also means "the key works".
     let digest = Sha256::digest(b"token-check");
@@ -129,6 +140,31 @@ fn check_keypair(session: &Session, label: &str) -> Result<String> {
         "sensitive, non-extractable, signs ok ({} byte signature)",
         signature.len()
     ))
+}
+
+/// The whole premise of an HSM is that the private key cannot be read out. If
+/// provisioning got this wrong the project's security story is void, so check it
+/// rather than trusting the provisioning script.
+fn check_protection(session: &Session, private_key: cryptoki::object::ObjectHandle) -> Result<()> {
+    let attrs = session
+        .get_attributes(
+            private_key,
+            &[AttributeType::Sensitive, AttributeType::Extractable],
+        )
+        .context("C_GetAttributeValue failed")?;
+
+    for attr in &attrs {
+        match attr {
+            Attribute::Sensitive(false) => {
+                return Err(anyhow!("private key is CKA_SENSITIVE=false"))
+            }
+            Attribute::Extractable(true) => {
+                return Err(anyhow!("private key is CKA_EXTRACTABLE=true"))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Create and immediately destroy a session-scoped object. Fails on a read-only session.

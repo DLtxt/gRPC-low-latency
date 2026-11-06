@@ -41,7 +41,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 
 # Public-key encoding: PKCS#11 hands back raw EC points and RSA moduli, but callers
 # want DER SubjectPublicKeyInfo. These also provide the in-process verify path in M5.
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 rsa = { version = "0.9", features = ["sha2"] }
 spki = "0.7"
 sha2 = "0.10"

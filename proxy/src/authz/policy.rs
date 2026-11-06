@@ -16,6 +16,12 @@ pub enum Operation {
     Encrypt,
     Decrypt,
     GetPublicKey,
+    /// Request a transfer from a transfer key (M10).
+    SignTransfer,
+    /// Review held transfers and submit approvals for them. Holding this grant does not
+    /// make anyone an approver -- approvals are signatures by keys registered in the
+    /// transfer policy -- it permits relaying them.
+    ApproveTransfer,
 }
 
 impl Operation {
@@ -26,6 +32,8 @@ impl Operation {
             Operation::Encrypt => "encrypt",
             Operation::Decrypt => "decrypt",
             Operation::GetPublicKey => "get_public_key",
+            Operation::SignTransfer => "sign_transfer",
+            Operation::ApproveTransfer => "approve_transfer",
         }
     }
 }
@@ -94,6 +102,36 @@ impl Policy {
             .get(identity)
             .and_then(|keys| keys.get(key_label))
             .is_some_and(|ops| ops.contains(&operation))
+    }
+
+    /// Every identity granted `operation` on `key_label`, sorted so that errors naming
+    /// them read the same on every run.
+    pub fn identities_granted(&self, key_label: &str, operation: Operation) -> Vec<&str> {
+        let mut identities: Vec<&str> = self
+            .grants
+            .iter()
+            .filter(|(_, keys)| {
+                keys.get(key_label)
+                    .is_some_and(|ops| ops.contains(&operation))
+            })
+            .map(|(identity, _)| identity.as_str())
+            .collect();
+        identities.sort_unstable();
+        identities
+    }
+
+    /// Every key on which anyone is granted `operation`, sorted.
+    pub fn keys_with(&self, operation: Operation) -> Vec<&str> {
+        let mut keys: Vec<&str> = self
+            .grants
+            .values()
+            .flat_map(|keys| keys.iter())
+            .filter(|(_, ops)| ops.contains(&operation))
+            .map(|(key, _)| key.as_str())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
     }
 
     pub fn identity_count(&self) -> usize {

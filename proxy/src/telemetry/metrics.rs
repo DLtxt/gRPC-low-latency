@@ -37,6 +37,14 @@ pub const BREAKER_STATE: &str = "hsm_circuit_breaker_state";
 pub const BREAKER_TRIPS: &str = "hsm_circuit_breaker_trips_total";
 pub const SESSION_RESETS: &str = "hsm_session_resets_total";
 
+// Transfer keys (M10). Labelled by key, chain and asset only as configured in the
+// transfer policy, never as a caller wrote them, so the label set stays bounded.
+pub const TRANSFERS_TOTAL: &str = "hsm_transfers_total";
+pub const TRANSFER_APPROVALS: &str = "hsm_transfer_approvals_total";
+pub const TRANSFERS_PENDING: &str = "hsm_transfers_pending";
+pub const TRANSFER_OUTFLOW_HOUR: &str = "hsm_transfer_outflow_last_hour";
+pub const TRANSFER_BUDGET_HOUR: &str = "hsm_transfer_auto_sign_budget_per_hour";
+
 /// End-to-end request latency, in seconds.
 ///
 /// Dense from 100 us to 2 ms because that range is where the acceptance criterion lives;
@@ -114,6 +122,23 @@ fn describe() {
         SESSION_RESETS,
         "PKCS#11 sessions reopened after a fatal error"
     );
+    describe_counter!(
+        TRANSFERS_TOTAL,
+        "Transfer requests by key, outcome (signed, held, refused, failed) and reason"
+    );
+    describe_counter!(
+        TRANSFER_APPROVALS,
+        "Approval signatures submitted, by result and reason"
+    );
+    describe_gauge!(TRANSFERS_PENDING, "Transfers held for approval");
+    describe_gauge!(
+        TRANSFER_OUTFLOW_HOUR,
+        "Whole units signed for in the last hour, per key, chain and asset"
+    );
+    describe_gauge!(
+        TRANSFER_BUDGET_HOUR,
+        "The hourly auto-sign budget the outflow is measured against"
+    );
 }
 
 /// Serve `/metrics` on its own port.
@@ -155,6 +180,7 @@ pub fn spawn_gauge_sampler(
     pool: std::sync::Arc<crate::pkcs11::Pool>,
     cache: std::sync::Arc<crate::cache::PublicKeyCache>,
     breaker: std::sync::Arc<crate::resilience::CircuitBreaker>,
+    transfers: std::sync::Arc<crate::transfer::TransferGuard>,
     interval: Duration,
 ) {
     use crate::pkcs11::metrics::PoolMetrics;
@@ -199,6 +225,27 @@ pub fn spawn_gauge_sampler(
             last_resets = resets;
 
             counter!(BREAKER_TRIPS).absolute(breaker.trips.load(Ordering::Relaxed));
+
+            // Sampled rather than set on each transfer: the hour's outflow falls as
+            // signatures age out of the window, with no event to report it.
+            let now = std::time::Instant::now();
+            gauge!(TRANSFERS_PENDING).set(transfers.pending_count(now) as f64);
+            for flow in transfers.outflow_last_hour(now) {
+                gauge!(
+                    TRANSFER_OUTFLOW_HOUR,
+                    "key_label" => flow.key_label.clone(),
+                    "chain" => flow.chain.clone(),
+                    "asset" => flow.asset.clone()
+                )
+                .set(flow.signed);
+                gauge!(
+                    TRANSFER_BUDGET_HOUR,
+                    "key_label" => flow.key_label,
+                    "chain" => flow.chain,
+                    "asset" => flow.asset
+                )
+                .set(flow.budget);
+            }
         }
     });
 }

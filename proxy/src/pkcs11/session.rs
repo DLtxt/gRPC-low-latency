@@ -2,10 +2,32 @@
 
 use anyhow::{anyhow, Context, Result};
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
-use cryptoki::object::{Attribute, ObjectClass, ObjectHandle};
+use cryptoki::object::{Attribute, AttributeType, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
+
+/// The `CKA_ID` that marks a key as transfer-only.
+///
+/// Set when the key is provisioned (`provision::ensure_transfer_key`) and read by every
+/// path that can call `C_Sign`, which refuses to sign anything with a marked key except
+/// a transfer the proxy built itself. The restriction travels with the key rather than
+/// living only in a policy file, so no handler, proxy mode, or missing file can turn a
+/// transfer key back into a blind signer.
+///
+/// It constrains this proxy, not the token: anyone holding the user PIN can still sign
+/// anything with any key through PKCS#11 directly.
+pub const TRANSFER_ONLY_ID: &[u8] = b"gll:transfer-only";
+
+/// Is this key marked transfer-only?
+pub fn is_transfer_only(session: &Session, key: ObjectHandle) -> Result<bool> {
+    let attributes = session
+        .get_attributes(key, &[AttributeType::Id])
+        .context("C_GetAttributeValue(CKA_ID) failed")?;
+    Ok(attributes.iter().any(
+        |attribute| matches!(attribute, Attribute::Id(id) if id.as_slice() == TRANSFER_ONLY_ID),
+    ))
+}
 
 /// Everything needed to reach a token, read from the environment.
 ///

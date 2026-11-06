@@ -5,6 +5,7 @@
 //! dedicated worker thread instead of a Tokio runtime thread.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use rand::RngCore;
 use tonic::{Request, Response, Status};
@@ -14,12 +15,16 @@ use crate::cache::{CachedPublicKey, Lookup, PublicKeyCache};
 use crate::crypto::{self, SigningInput};
 use crate::pkcs11::{JobRequest, JobResponse, Pool, PoolError};
 use crate::proto::v1::{
-    hsm_service_server::HsmService, signing_input, CipherMechanism, DecryptRequest,
-    DecryptResponse, EncryptRequest, EncryptResponse, GetPublicKeyRequest, GetPublicKeyResponse,
-    SignRequest, SignResponse, VerifyRequest, VerifyResponse,
+    hsm_service_server::HsmService, signing_input, ApproveTransferRequest, ApproveTransferResponse,
+    CipherMechanism, DecryptRequest, DecryptResponse, EncryptRequest, EncryptResponse,
+    GetPendingTransferRequest, GetPublicKeyRequest, GetPublicKeyResponse, PendingTransfer,
+    SignRequest, SignResponse, SignTransferRequest, SignTransferResponse, TransferStatus,
+    VerifyRequest, VerifyResponse,
 };
 use crate::resilience::{CircuitBreaker, RateLimiter};
 use crate::telemetry::metrics as m;
+use crate::transfer::canonical::to_hex;
+use crate::transfer::{self, HoldStatus, Outcome, Refusal, TransferGuard, TransferRequest};
 
 /// 96-bit IV: the standard GCM size and the fast path in most implementations.
 const GCM_IV_LEN: usize = 12;
@@ -37,6 +42,9 @@ pub struct PooledService {
     /// to prevent.
     rate_limiter: Option<Arc<RateLimiter>>,
     breaker: Arc<CircuitBreaker>,
+    /// Always present, even with no transfer policy: it is what refuses `Sign` on a
+    /// transfer key, and that must not depend on whether a policy file was found.
+    transfers: Arc<TransferGuard>,
 }
 
 impl PooledService {
@@ -46,6 +54,7 @@ impl PooledService {
         cache: Arc<PublicKeyCache>,
         rate_limiter: Option<Arc<RateLimiter>>,
         breaker: Arc<CircuitBreaker>,
+        transfers: Arc<TransferGuard>,
     ) -> Self {
         Self {
             pool,
@@ -53,10 +62,12 @@ impl PooledService {
             cache,
             rate_limiter,
             breaker,
+            transfers,
         }
     }
 
-    /// Admission control, run before any work is done.
+    /// Admission control, run before any work is done. Returns the caller's identity,
+    /// or `None` when mTLS is off and there is none.
     ///
     /// Order matters and is chosen so the cheapest rejection happens first: the circuit
     /// breaker is a single atomic load, the rate limiter is a hash lookup, and
@@ -67,7 +78,7 @@ impl PooledService {
         request: &Request<T>,
         key_label: &str,
         operation: Operation,
-    ) -> Result<(), Status> {
+    ) -> Result<Option<Arc<str>>, Status> {
         // 1. Is the dependency healthy? If not, fail immediately rather than spending a
         //    worker slot and the caller's deadline to discover it again.
         if !self.breaker.allow() {
@@ -93,7 +104,26 @@ impl PooledService {
             }
         }
 
-        Ok(())
+        Ok(identity)
+    }
+
+    /// Admission for the transfer RPCs, which additionally require an identity.
+    ///
+    /// A held transfer is bound to the identity that requested it, and approvals are
+    /// relayed by an identity granted to do so. With mTLS off there is neither, and a
+    /// transfer key reachable by anonymous callers would undo the point of having one.
+    fn admit_transfer<T>(
+        &self,
+        request: &Request<T>,
+        key_label: &str,
+        operation: Operation,
+    ) -> Result<Arc<str>, Status> {
+        self.admit(request, key_label, operation)?.ok_or_else(|| {
+            Status::failed_precondition(
+                "transfer keys are served only with mTLS on (PROXY_TLS=on): a transfer is \
+                 bound to the identity that requested it",
+            )
+        })
     }
 
     /// Record a completed request: its latency, and its result by operation.
@@ -199,6 +229,17 @@ fn to_status(error: PoolError) -> Status {
             Status::not_found(format!("no key labelled '{label}' on the token"))
         }
         PoolError::InvalidRequest(message) => Status::invalid_argument(message),
+        PoolError::TransferOnly(label) => {
+            Status::permission_denied(transfer::raw_sign_refusal(&label))
+        }
+        PoolError::NotTransferKey(label) => {
+            // The policy calls this a transfer key and the token disagrees. Startup
+            // checks for this, so reaching it means the token changed underneath us.
+            tracing::error!(key = %label, "transfer key is not marked transfer-only on the token");
+            Status::failed_precondition(format!(
+                "key '{label}' is not marked transfer-only on the token"
+            ))
+        }
         PoolError::Overloaded => {
             Status::resource_exhausted("request queue is full; retry after backing off")
         }
@@ -245,12 +286,74 @@ fn unexpected(response: JobResponse) -> Status {
     Status::internal("internal error")
 }
 
+/// Map a transfer refusal onto a gRPC status. As with pool errors, the code is what a
+/// caller decides retries on: a policy refusal never succeeds on retry, a rate refusal
+/// does once the minute passes.
+fn refusal_status(refusal: &Refusal) -> Status {
+    let message = refusal.to_string();
+    match refusal {
+        Refusal::Invalid(_) => Status::invalid_argument(message),
+        Refusal::NotATransferKey(_) | Refusal::ApproverKeyMissing(_) => {
+            Status::failed_precondition(message)
+        }
+        Refusal::RateLimited { .. } | Refusal::TooManyHolds { .. } => {
+            Status::resource_exhausted(message)
+        }
+        Refusal::NoSuchHold | Refusal::StaleHold => Status::not_found(message),
+        Refusal::Internal => Status::internal(message),
+        Refusal::AssetNotAllowed { .. }
+        | Refusal::DestinationNotAllowed { .. }
+        | Refusal::OverMaxPerTransfer { .. }
+        | Refusal::HeldForAnotherRequester
+        | Refusal::NotAnApprover { .. }
+        | Refusal::BadApprovalSignature(_) => Status::permission_denied(message),
+    }
+}
+
+fn digest_from(bytes: &[u8]) -> Result<[u8; 32], Status> {
+    bytes
+        .try_into()
+        .map_err(|_| Status::invalid_argument("digest must be the 32-byte SHA-256 of the transfer"))
+}
+
+fn held_response(status: &HoldStatus) -> SignTransferResponse {
+    SignTransferResponse {
+        status: TransferStatus::PendingApproval as i32,
+        canonical_transfer: status.transfer.encode(),
+        digest: status.transfer.digest().to_vec(),
+        signature: Vec::new(),
+        hold_reason: status.reason.clone(),
+        approvals_required: status.required as u32,
+        approvals_received: status.received() as u32,
+    }
+}
+
 impl PooledService {
+    /// Count a transfer decision. Labelled by key only once the key is known to be a
+    /// configured transfer key, so a caller cannot grow the label set by inventing names.
+    fn count_transfer(&self, key_label: &str, outcome: &'static str, reason: &'static str) {
+        let key = if self.transfers.is_transfer_key(key_label) {
+            key_label.to_string()
+        } else {
+            "other".to_string()
+        };
+        metrics::counter!(m::TRANSFERS_TOTAL, "key_label" => key, "outcome" => outcome, "reason" => reason)
+            .increment(1);
+    }
+
     async fn sign_inner(
         &self,
         request: Request<SignRequest>,
     ) -> Result<Response<SignResponse>, Status> {
         self.admit(&request, &request.get_ref().key_label, Operation::Sign)?;
+        // With mTLS on, no identity can hold `sign` on a transfer key -- the policy
+        // refuses to load such a grant -- so this matters with mTLS off, where admission
+        // lets everything through. The worker refuses again on the token's marker.
+        if self.transfers.is_transfer_key(&request.get_ref().key_label) {
+            return Err(Status::permission_denied(transfer::raw_sign_refusal(
+                &request.get_ref().key_label,
+            )));
+        }
         let request = request.into_inner();
         let input = extract_input(request.input)?;
         let prepared = crypto::prepare(request.mechanism, input)
@@ -395,6 +498,221 @@ impl PooledService {
             served_from_cache,
         }))
     }
+
+    async fn sign_transfer_inner(
+        &self,
+        request: Request<SignTransferRequest>,
+    ) -> Result<Response<SignTransferResponse>, Status> {
+        let requester = self.admit_transfer(
+            &request,
+            &request.get_ref().key_label,
+            Operation::SignTransfer,
+        )?;
+        let request = request.into_inner();
+        let key_label = request.key_label;
+        let transfer = request
+            .transfer
+            .ok_or_else(|| Status::invalid_argument("transfer must be set"))?;
+        let ask = TransferRequest {
+            chain: &transfer.chain,
+            asset: &transfer.asset,
+            destination: &transfer.destination,
+            amount: &transfer.amount,
+            nonce: transfer.nonce,
+        };
+
+        let outcome = match self
+            .transfers
+            .submit(&requester, &key_label, &ask, Instant::now())
+        {
+            Ok(outcome) => outcome,
+            Err(refusal) => {
+                self.count_transfer(&key_label, "refused", refusal.reason());
+                tracing::warn!(
+                    target: "audit",
+                    requester = %requester,
+                    key = %key_label,
+                    destination = ?transfer.destination,
+                    amount = ?transfer.amount,
+                    asset = ?transfer.asset,
+                    nonce = transfer.nonce,
+                    reason = refusal.reason(),
+                    "transfer refused: {refusal}"
+                );
+                return Err(refusal_status(&refusal));
+            }
+        };
+
+        let (transfer, reservation) = match outcome {
+            Outcome::Held(status) => {
+                self.count_transfer(&key_label, "held", status.kind.as_str());
+                tracing::info!(
+                    target: "audit",
+                    requester = %requester,
+                    transfer = %status.transfer.summary(),
+                    digest = %to_hex(&status.transfer.digest()),
+                    approvals = status.received(),
+                    required = status.required,
+                    "transfer held: {}",
+                    status.reason
+                );
+                return Ok(Response::new(held_response(&status)));
+            }
+            Outcome::Sign {
+                transfer,
+                reservation,
+            } => (transfer, reservation),
+        };
+
+        let digest = transfer.digest();
+        let approved_by = reservation.approvers();
+        let response = self
+            .pool
+            .submit(JobRequest::SignTransfer {
+                key_label: key_label.clone(),
+                digest,
+            })
+            .await
+            .map_err(to_status);
+        self.observe(&response);
+
+        let signature = match response {
+            Ok(JobResponse::Signature(signature)) => signature,
+            failed => {
+                // No signature exists, so it must not count against the limits -- and if
+                // it was releasing an approved hold, the approvals go back with it.
+                self.transfers.release(reservation);
+                self.count_transfer(&key_label, "failed", "hsm");
+                return Err(match failed {
+                    Ok(other) => unexpected(other),
+                    Err(status) => status,
+                });
+            }
+        };
+
+        self.count_transfer(
+            &key_label,
+            "signed",
+            if approved_by.is_empty() {
+                "auto"
+            } else {
+                "approved"
+            },
+        );
+        tracing::info!(
+            target: "audit",
+            requester = %requester,
+            transfer = %transfer.summary(),
+            digest = %to_hex(&digest),
+            approved_by = ?approved_by,
+            "transfer signed"
+        );
+
+        let required = if approved_by.is_empty() {
+            0
+        } else {
+            self.transfers
+                .policy()
+                .key(&key_label)
+                .map_or(0, |rules| rules.quorum as u32)
+        };
+        Ok(Response::new(SignTransferResponse {
+            status: TransferStatus::Signed as i32,
+            canonical_transfer: transfer.encode(),
+            digest: digest.to_vec(),
+            signature,
+            hold_reason: String::new(),
+            approvals_required: required,
+            approvals_received: approved_by.len() as u32,
+        }))
+    }
+
+    async fn get_pending_transfer_inner(
+        &self,
+        request: Request<GetPendingTransferRequest>,
+    ) -> Result<Response<PendingTransfer>, Status> {
+        self.admit_transfer(
+            &request,
+            &request.get_ref().key_label,
+            Operation::ApproveTransfer,
+        )?;
+        let request = request.into_inner();
+        let digest = digest_from(&request.digest)?;
+
+        let status = self
+            .transfers
+            .pending(&request.key_label, &digest, Instant::now())
+            .map_err(|refusal| refusal_status(&refusal))?;
+
+        Ok(Response::new(PendingTransfer {
+            key_label: request.key_label,
+            canonical_transfer: status.transfer.encode(),
+            digest: digest.to_vec(),
+            hold_reason: status.reason.clone(),
+            approvals_required: status.required as u32,
+            approved_by: status.approved_by.clone(),
+            expires_in_seconds: status.expires_in.as_secs(),
+            hold_id: status.hold_id.to_vec(),
+        }))
+    }
+
+    async fn approve_transfer_inner(
+        &self,
+        request: Request<ApproveTransferRequest>,
+    ) -> Result<Response<ApproveTransferResponse>, Status> {
+        let relayed_by = self.admit_transfer(
+            &request,
+            &request.get_ref().key_label,
+            Operation::ApproveTransfer,
+        )?;
+        let request = request.into_inner();
+        let digest = digest_from(&request.digest)?;
+
+        let result = self.transfers.approve(
+            &request.key_label,
+            &digest,
+            &request.hold_id,
+            &request.approver,
+            &request.signature,
+            Instant::now(),
+        );
+        match result {
+            Ok(status) => {
+                metrics::counter!(m::TRANSFER_APPROVALS, "result" => "accepted", "reason" => "ok")
+                    .increment(1);
+                tracing::info!(
+                    target: "audit",
+                    approver = %request.approver,
+                    relayed_by = %relayed_by,
+                    transfer = %status.transfer.summary(),
+                    digest = %to_hex(&digest),
+                    approvals = status.received(),
+                    required = status.required,
+                    "transfer approval accepted"
+                );
+                Ok(Response::new(ApproveTransferResponse {
+                    approvals_required: status.required as u32,
+                    approvals_received: status.received() as u32,
+                    approved: status.approved(),
+                }))
+            }
+            Err(refusal) => {
+                metrics::counter!(m::TRANSFER_APPROVALS, "result" => "rejected", "reason" => refusal.reason())
+                    .increment(1);
+                // A signature that does not verify is someone trying to approve without
+                // the approver's key. That is worth more than a debug line.
+                tracing::warn!(
+                    target: "audit",
+                    approver = ?request.approver,
+                    relayed_by = %relayed_by,
+                    digest = %to_hex(&digest),
+                    reason = refusal.reason(),
+                    "transfer approval rejected: {refusal}"
+                );
+                Err(refusal_status(&refusal))
+            }
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -443,6 +761,36 @@ impl HsmService for PooledService {
         let started = std::time::Instant::now();
         let result = self.get_public_key_inner(request).await;
         self.record("get_public_key", started, &result);
+        result
+    }
+
+    async fn sign_transfer(
+        &self,
+        request: Request<SignTransferRequest>,
+    ) -> Result<Response<SignTransferResponse>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.sign_transfer_inner(request).await;
+        self.record("sign_transfer", started, &result);
+        result
+    }
+
+    async fn get_pending_transfer(
+        &self,
+        request: Request<GetPendingTransferRequest>,
+    ) -> Result<Response<PendingTransfer>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.get_pending_transfer_inner(request).await;
+        self.record("get_pending_transfer", started, &result);
+        result
+    }
+
+    async fn approve_transfer(
+        &self,
+        request: Request<ApproveTransferRequest>,
+    ) -> Result<Response<ApproveTransferResponse>, Status> {
+        let started = std::time::Instant::now();
+        let result = self.approve_transfer_inner(request).await;
+        self.record("approve_transfer", started, &result);
         result
     }
 }

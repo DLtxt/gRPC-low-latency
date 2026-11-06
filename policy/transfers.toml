@@ -1,0 +1,70 @@
+# Transfer policy (M10): what a transfer key may sign, and who approves what it holds.
+#
+# authz.toml decides *who* may use a key. This file decides *what* a transfer key will
+# sign, whoever is asking -- because a caller that can use a key is exactly what an
+# attacker has after compromising one. A key listed here signs nothing but transfers the
+# proxy built itself, checked against the rules below:
+#
+#   destinations         hard allowlist. Anything else is refused outright.
+#   max_per_transfer     hard cap. Larger transfers are refused, approved or not.
+#   approval_above       larger transfers are held until `quorum` approvers sign them.
+#   auto_sign_per_hour   once the last hour's signed total would pass this, every
+#                        transfer is held, however small. Approvals lift this limit.
+#   max_transfers_per_minute
+#                        a burst limit per key, which approvals do not lift.
+#
+# Amounts are decimal strings in whole units ("12.5"), never floats, and are compiled
+# into the asset's smallest unit with exact integer arithmetic at load.
+#
+# An approver is a name and a P-256 public key, read from certs/approvers/<name>.pub
+# (scripts/gen-certs.sh creates the demo ones). The private halves are never given to
+# the proxy: an approval is a signature by the approver's own key over the full
+# transfer, so a proxy that is compromised cannot approve anything by itself.
+#
+# Keep this file under change control. Whoever can edit it can raise every limit.
+
+[[approvers]]
+name = "alice"
+description = "Treasury officer"
+
+[[approvers]]
+name = "bob"
+description = "Treasury officer"
+
+[[approvers]]
+name = "carol"
+description = "Security on-call"
+
+[[keys]]
+key_label = "demo-hot-wallet"
+description = "Hot wallet. Withdrawals to the cold wallet and the settlement account only."
+approvers = ["alice", "bob", "carol"]
+quorum = 2
+# Long enough for two people to look; short enough that a held transfer nobody wanted
+# does not linger as something an attacker can wait out.
+hold_ttl_secs = 900
+max_pending = 64
+max_transfers_per_minute = 60
+
+[[keys.assets]]
+chain = "devnet"
+asset = "ETH"
+decimals = 18
+max_per_transfer = "250"
+approval_above = "10"
+auto_sign_per_hour = "50"
+destinations = [
+    "0xc01dc01dc01dc01dc01dc01dc01dc01dc01dc01d", # cold wallet
+    "0x5e775e775e775e775e775e775e775e775e775e77", # settlement account
+]
+
+[[keys.assets]]
+chain = "devnet"
+asset = "USDC"
+decimals = 6
+max_per_transfer = "500000"
+approval_above = "25000"
+auto_sign_per_hour = "100000"
+destinations = [
+    "0x5e775e775e775e775e775e775e775e775e775e77", # settlement account
+]

@@ -12,6 +12,15 @@ pub enum PoolError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    /// A generic `Sign` asked for a key marked transfer-only on the token.
+    #[error("key '{0}' is marked transfer-only and signs nothing but checked transfers")]
+    TransferOnly(String),
+
+    /// A transfer signature asked for a key that is not marked transfer-only: the
+    /// transfer policy and the token disagree about what the key is.
+    #[error("key '{0}' is not marked transfer-only on the token")]
+    NotTransferKey(String),
+
     /// The bounded queue was full. Shedding here is deliberate: queueing this request
     /// would raise the tail latency of every request already accepted, which is exactly
     /// the failure mode the project exists to avoid.

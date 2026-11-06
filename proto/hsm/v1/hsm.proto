@@ -11,7 +11,8 @@ option go_package = "github.com/DLtxt/gRPC-low-latency/gen/hsm/v1;hsmv1";
 // certificates -- are cacheable, so Verify and GetPublicKey may be answered entirely
 // in-process once warm. See plan.md 2 and 4.4.
 service HsmService {
-  // Produce a signature. Always reaches the HSM.
+  // Produce a signature over whatever the caller sends. Always reaches the HSM.
+  // Refused for transfer keys, which sign only through SignTransfer.
   rpc Sign(SignRequest) returns (SignResponse);
 
   // Check a signature. Served in-process from the cached public key when warm.
@@ -25,6 +26,21 @@ service HsmService {
 
   // Fetch a public key as DER SubjectPublicKeyInfo. Cacheable.
   rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse);
+
+  // Sign a transfer of value with a transfer key.
+  //
+  // Unlike Sign, the caller never supplies bytes or a hash. It describes the transfer,
+  // and the proxy builds the exact bytes it signs from fields it has checked against
+  // policy/transfers.toml: the destination allowlist, the per-transfer cap, the
+  // per-minute rate, and the hourly auto-sign budget. A transfer that needs a human is
+  // held rather than signed. See docs/m10-transfer-keys.md.
+  rpc SignTransfer(SignTransferRequest) returns (SignTransferResponse);
+
+  // Fetch a held transfer so an approver can review it.
+  rpc GetPendingTransfer(GetPendingTransferRequest) returns (PendingTransfer);
+
+  // Add one approver's signature to a held transfer.
+  rpc ApproveTransfer(ApproveTransferRequest) returns (ApproveTransferResponse);
 }
 
 enum SignatureMechanism {
@@ -125,4 +141,122 @@ message GetPublicKeyResponse {
   string key_type = 2;
 
   bool served_from_cache = 3;
+}
+
+// A transfer of value, as the caller describes it.
+//
+// Strings are limited to plain ASCII (see docs/m10-transfer-keys.md). An approver is
+// shown what these fields say, and a lookalike or invisible character would let a
+// destination display as something it is not.
+message Transfer {
+  // Network, as configured for the key in policy/transfers.toml, e.g. "devnet".
+  string chain = 1;
+
+  // Asset symbol, e.g. "ETH".
+  string asset = 2;
+
+  // Recipient address. Compared exactly against the destination allowlist.
+  string destination = 3;
+
+  // Decimal amount in whole units of the asset, e.g. "12.5". A string because the
+  // amounts real assets need do not fit a uint64 of their smallest unit, and because
+  // floating point has no business near money.
+  string amount = 4;
+
+  // Chosen by the caller, unique per transfer. Part of the signed bytes, so two
+  // otherwise identical transfers sign differently and an approval for one cannot be
+  // applied to the other.
+  uint64 nonce = 5;
+}
+
+message SignTransferRequest {
+  string key_label = 1;
+  Transfer transfer = 2;
+}
+
+enum TransferStatus {
+  TRANSFER_STATUS_UNSPECIFIED = 0;
+
+  // Signed. `signature` is set.
+  TRANSFER_STATUS_SIGNED = 1;
+
+  // Held until enough approvers sign off. Once they have, call SignTransfer again
+  // with the identical transfer to collect the signature.
+  TRANSFER_STATUS_PENDING_APPROVAL = 2;
+}
+
+message SignTransferResponse {
+  TransferStatus status = 1;
+
+  // The exact bytes that were signed, or will be once approved. A verifier checks the
+  // signature against these with Verify, and decodes them rather than trusting the
+  // request it thinks it sent.
+  bytes canonical_transfer = 2;
+
+  // SHA-256 of canonical_transfer. Identifies a held transfer to approvers.
+  bytes digest = 3;
+
+  // ECDSA P-256 with SHA-256 over canonical_transfer, raw r||s. Set when SIGNED.
+  bytes signature = 4;
+
+  // Why the transfer is held. Set when PENDING_APPROVAL.
+  string hold_reason = 5;
+
+  uint32 approvals_required = 6;
+  uint32 approvals_received = 7;
+}
+
+message GetPendingTransferRequest {
+  string key_label = 1;
+  bytes digest = 2;
+}
+
+message PendingTransfer {
+  string key_label = 1;
+
+  // What an approver must decode and check for itself before signing, rather than
+  // trusting any summary of it -- including this message's other fields.
+  bytes canonical_transfer = 2;
+
+  bytes digest = 3;
+  string hold_reason = 4;
+  uint32 approvals_required = 5;
+
+  // Approvers who have signed so far.
+  repeated string approved_by = 6;
+
+  // Seconds until the hold lapses and the transfer has to be requested again.
+  uint64 expires_in_seconds = 7;
+
+  // 16 random bytes, fresh for every hold, and part of what approvers sign. An approval
+  // therefore counts for this hold only, and cannot be replayed onto a later hold of
+  // the identical transfer.
+  bytes hold_id = 8;
+}
+
+message ApproveTransferRequest {
+  string key_label = 1;
+  bytes digest = 2;
+
+  // Approver name, as registered in policy/transfers.toml.
+  string approver = 3;
+
+  // ECDSA P-256 with SHA-256, raw r||s, by the approver's own key over the approval
+  // message: the 16 bytes "gll-approval-v1\0", then hold_id, then canonical_transfer.
+  // The signature covers the whole transfer rather than its digest so that a hardware
+  // signer can decode and display what it is approving before it signs.
+  bytes signature = 4;
+
+  // The hold being approved, from PendingTransfer.hold_id. If the transfer has since
+  // been collected or requested anew, this no longer matches and the approval is
+  // refused, so it has to be reviewed again.
+  bytes hold_id = 5;
+}
+
+message ApproveTransferResponse {
+  uint32 approvals_required = 1;
+  uint32 approvals_received = 2;
+
+  // True once enough approvers have signed; the requester can now collect.
+  bool approved = 3;
 }
