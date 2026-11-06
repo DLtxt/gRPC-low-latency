@@ -218,3 +218,12 @@ jobs:
           fi
           kill "${PROXY_PID}"
           echo "authorization denial confirmed"
+
+      - name: Transfer policy smoke
+        # M10 end to end over mTLS: a blind signature refused, a policy granting one
+        # refused at startup, allowlist and cap refusals, a two-of-three approval with a
+        # forged approval rejected, single-use approvals, and the hourly budget. Every
+        # step asserts its outcome, so a refusal that stops refusing fails the build.
+        run: |
+          export PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
+          ./scripts/transfer-demo.sh

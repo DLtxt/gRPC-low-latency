@@ -26,6 +26,10 @@ path = "src/bin/provision.rs"
 name = "hsm-ceiling"
 path = "src/bin/hsm-ceiling.rs"
 
+[[bin]]
+name = "transfer"
+path = "src/bin/transfer.rs"
+
 [dependencies]
 # PKCS#11
 cryptoki = "0.12"

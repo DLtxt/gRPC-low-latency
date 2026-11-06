@@ -5,7 +5,7 @@
 SHELL := /bin/sh
 COMPOSE := docker compose
 
-.PHONY: help env up down logs clean check spike fmt lint test
+.PHONY: help env up down logs clean check spike fmt lint test transfer-demo
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -14,8 +14,11 @@ help: ## Show this help
 env: ## Generate .env with random PINs (idempotent)
 	@./scripts/gen-env.sh
 
-certs: ## Generate the local CA, server cert, and per-workload client certs
+certs: ## Generate the local CA, server cert, per-workload client certs, and approver keys
 	@./scripts/gen-certs.sh
+
+transfer-demo: env certs ## M10: a hot-wallet key that signs only checked transfers, end to end
+	@./scripts/transfer-demo.sh
 
 up: env certs ## Provision the token and start the full stack (detached)
 	@$(COMPOSE) up --build -d
