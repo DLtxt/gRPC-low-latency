@@ -25,9 +25,10 @@ beside the key, so compromising a caller does not get around them. A check upstr
 signer that trusts its callers stops nothing once that upstream service falls.
 
 M10 builds this for one kind of request: a transfer of value. Some parts do not depend
-on the request type and would carry over to another: the transfer-only marker on the
-token, the workers' refusal to blind-sign, approver keys, and the approval check. The
-encoding, the policy, and the limits are specific to transfers.
+on the request type, and [M11](m11-release-keys.md) reuses them for a second, software
+releases: the purpose marker on the token, the workers' refusal to blind-sign, approver
+keys, holding and approving, and the rolling windows. The encoding, the policy, and the
+limits are specific to transfers.
 
 None of this makes the proxy a wallet. It holds no balances, talks to no blockchain, and
 sends nothing anywhere. It signs, and whatever moves the value sits in front of it.
@@ -74,10 +75,10 @@ sequenceDiagram
     else above threshold, or past the budget
         X-->>P: PENDING_APPROVAL + digest
         A->>R: review digest
-        R->>X: GetPendingTransfer(digest)
+        R->>X: GetPendingApproval(digest)
         X-->>R: canonical bytes + hold id
         A->>A: decode the bytes, check they hash to the digest, sign them with the hold id
-        R->>X: ApproveTransfer(approver, signature), once per approver
+        R->>X: Approve(approver, signature), once per approver
         P->>X: SignTransfer, same transfer again
         X->>T: C_Sign, once quorum is reached
         X-->>P: SIGNED, approvals spent
@@ -94,7 +95,8 @@ Four layers, each enforced separately, so a mistake in one is caught by the next
 
 1. **Authorization.** No identity may be granted `sign` on a transfer key. The proxy
    refuses to start with a policy that grants it (demo step 1b), and also refuses one
-   granting `sign_transfer` or `approve_transfer` on an ordinary key.
+   granting `sign_transfer` on a key that is not a transfer key, or `approve` on an
+   ordinary key.
 2. **The handler.** `Sign` on any key named in `policy/transfers.toml` returns
    `PERMISSION_DENIED`, in both backends. This is what applies when mTLS is off and
    authorization cannot run.
@@ -102,7 +104,7 @@ Four layers, each enforced separately, so a mistake in one is caught by the next
    `CKA_MODIFIABLE=false`, and `CKA_COPYABLE=false`. The worker that owns each session
    refuses a generic signature on a marked key, and a transfer signature on an unmarked
    one, whatever the policy file or proxy mode. The marker cannot be rewritten or shed by
-   copying the key into an unmarked twin; `tests/transfer.rs` checks both against
+   copying the key into an unmarked twin; `tests/purpose_keys.rs` checks both against
    SoftHSM, with controls showing that the same operations succeed on an ordinary key. At
    startup the proxy checks that every transfer key in the policy is marked on the token,
    and refuses to start otherwise.
@@ -168,7 +170,7 @@ Some decisions behind those rules:
   would collect an approval that verifies for neither. That is the Bybit failure: the
   approvers there signed what a compromised interface showed them.
 - **Separation of duties is checked at load.** The proxy refuses a policy granting one
-  identity both `sign_transfer` and `approve_transfer` on the same key. The `treasury`
+  identity both `sign_transfer` and `approve` on the same key. The `treasury`
   identity relays approvals; it can neither approve on its own, since that takes the
   approvers' keys, nor request transfers.
 - **Holds are bounded.** They expire after `hold_ttl_secs` (default 15 minutes), there are
@@ -266,7 +268,7 @@ Without `--yes`, `approve` shows the decoded transfer and waits for the approver
 `approve`.
 
 Metrics: `hsm_transfers_total{key_label, outcome, reason}`,
-`hsm_transfer_approvals_total{result, reason}`, `hsm_transfers_pending`, and
+`hsm_approvals_total{purpose="transfer", result, reason}`, `hsm_transfers_pending`, and
 `hsm_transfer_outflow_last_hour` beside `hsm_transfer_auto_sign_budget_per_hour`, both
 per key, chain and asset. Labels come from the policy, never from what a caller sent, so
 a caller cannot grow the label set by inventing names.
@@ -275,12 +277,13 @@ a caller cannot grow the label set by inventing names.
 
 | Path | What |
 |---|---|
-| `proxy/src/transfer/canonical.rs` | the transfer format, amount parsing, approval message |
-| `proxy/src/transfer/policy.rs` | loading and validating `policy/transfers.toml`, cross-checks against authz |
-| `proxy/src/transfer/velocity.rs` | bucketed rolling windows |
-| `proxy/src/transfer/guard.rs` | sign, hold, or refuse; holds and approvals |
+| `proxy/src/transfer/canonical.rs` | the transfer format and amount parsing |
+| `proxy/src/transfer/policy.rs` | loading and validating `policy/transfers.toml` |
+| `proxy/src/transfer/guard.rs` | sign, hold, or refuse |
+| `proxy/src/approval.rs` | holds, approvals, the approval message, and the cross-checks against authz; shared with release keys |
+| `proxy/src/velocity.rs` | bucketed rolling windows, shared |
 | `proxy/src/pkcs11/worker.rs` | the token-level refusal |
 | `proxy/src/pkcs11/provision.rs` | creating a marked, non-modifiable, non-copyable key |
-| `proxy/src/bin/transfer.rs` | the requester and approver CLI |
-| `proxy/tests/transfer.rs` | the token-level guarantees, against SoftHSM |
+| `proxy/src/bin/transfer.rs` | the requester and approver CLI, on the shared `proxy/src/cli.rs` |
+| `proxy/tests/purpose_keys.rs` | the token-level guarantees for transfer and release keys, against SoftHSM |
 | `scripts/transfer-demo.sh` | the demo, and the CI check |

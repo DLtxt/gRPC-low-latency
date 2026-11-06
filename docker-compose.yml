@@ -37,9 +37,10 @@ services:
       CERT_DIR: /etc/grpc-low-latency/certs
       AUTHZ_POLICY: /etc/grpc-low-latency/policy/authz.toml
       # Named explicitly, so a missing file stops the proxy rather than quietly
-      # leaving transfer keys without limits. Approver public keys are read from
-      # CERT_DIR/approvers; their private halves are never mounted here.
+      # leaving transfer or release keys without limits. Approver public keys are read
+      # from CERT_DIR/approvers; their private halves are never mounted here.
       TRANSFER_POLICY: /etc/grpc-low-latency/policy/transfers.toml
+      RELEASE_POLICY: /etc/grpc-low-latency/policy/releases.toml
       PROXY_TLS: ${PROXY_TLS:-on}
       METRICS_ADDR: 0.0.0.0:9090
     volumes:

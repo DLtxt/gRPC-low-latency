@@ -30,7 +30,7 @@ use crate::crypto;
 use super::errors::{is_session_fatal, PoolError};
 use super::job::{Job, JobRequest, JobResponse, KeyKind};
 use super::metrics::PoolMetrics;
-use super::session::{find_object, is_transfer_only, login_session, TokenConfig};
+use super::session::{find_object, login_session, purpose_of, Purpose, TokenConfig};
 
 /// AES-GCM: 96-bit IV, 128-bit tag.
 const GCM_TAG_BITS: u64 = 128;
@@ -41,10 +41,10 @@ struct KeyHandles {
     private: Option<ObjectHandle>,
     public: Option<ObjectHandle>,
     secret: Option<ObjectHandle>,
-    /// Whether the private key carries `TRANSFER_ONLY_ID`. Read once, when the private
+    /// The purpose the private key is marked with, if any. Read once, when the private
     /// handle is first resolved, and cached with it: the marker is fixed at provisioning,
     /// so re-reading it would put a `C_GetAttributeValue` on every signature for nothing.
-    transfer_only: bool,
+    purpose: Option<Purpose>,
 }
 
 impl KeyHandles {
@@ -184,8 +184,11 @@ impl Worker {
                 // Refused here, on the thread that owns the session, rather than only in
                 // a handler: this is the one place every generic signature passes through,
                 // whichever backend, TLS mode, or policy file is in effect.
-                if self.transfer_only(key_label) {
-                    return Err(PoolError::TransferOnly(key_label.clone()));
+                if let Some(purpose) = self.purpose(key_label) {
+                    return Err(PoolError::PurposeBound {
+                        key_label: key_label.clone(),
+                        purpose,
+                    });
                 }
                 let signature = self
                     .session
@@ -194,10 +197,19 @@ impl Worker {
                 Ok(JobResponse::Signature(signature))
             }
 
-            JobRequest::SignTransfer { key_label, digest } => {
+            JobRequest::SignStatement {
+                purpose,
+                key_label,
+                digest,
+            } => {
                 let key = self.handle(KeyKind::Private, key_label)?;
-                if !self.transfer_only(key_label) {
-                    return Err(PoolError::NotTransferKey(key_label.clone()));
+                // A transfer key cannot sign a release, nor a release key a transfer: the
+                // formats differ, but the token's marker is what makes it impossible.
+                if self.purpose(key_label) != Some(*purpose) {
+                    return Err(PoolError::WrongPurpose {
+                        key_label: key_label.clone(),
+                        expected: *purpose,
+                    });
                 }
                 let signature = self
                     .session
@@ -209,7 +221,7 @@ impl Worker {
             JobRequest::DescribeKey { key_label } => {
                 self.handle(KeyKind::Private, key_label)?;
                 Ok(JobResponse::KeyDescription {
-                    transfer_only: self.transfer_only(key_label),
+                    purpose: self.purpose(key_label),
                 })
             }
 
@@ -301,28 +313,26 @@ impl Worker {
             .ok_or_else(|| PoolError::KeyNotFound(label.to_string()))?;
 
         // Failing to read the marker fails the lookup: treating an unreadable marker as
-        // "not transfer-only" would be failing open on exactly the key that matters.
-        let transfer_only = match kind {
-            KeyKind::Private => is_transfer_only(&self.session, handle)
+        // "no purpose" would be failing open on exactly the keys that matter.
+        let purpose = match kind {
+            KeyKind::Private => purpose_of(&self.session, handle)
                 .map_err(|e| PoolError::Internal(format!("{e:#}")))?,
-            KeyKind::Public | KeyKind::Secret => false,
+            KeyKind::Public | KeyKind::Secret => None,
         };
 
         let entry = self.handles.entry(label.to_string()).or_default();
         entry.set(kind, handle);
         if kind == KeyKind::Private {
-            entry.transfer_only = transfer_only;
+            entry.purpose = purpose;
         }
 
         Ok(handle)
     }
 
-    /// Whether `label`'s private key is marked transfer-only. Only meaningful after the
+    /// The purpose `label`'s private key is marked with. Only meaningful after the
     /// private handle has been resolved, which every caller does first.
-    fn transfer_only(&self, label: &str) -> bool {
-        self.handles
-            .get(label)
-            .is_some_and(|handles| handles.transfer_only)
+    fn purpose(&self, label: &str) -> Option<Purpose> {
+        self.handles.get(label).and_then(|handles| handles.purpose)
     }
 
     /// Close the broken session, open a fresh one, and drop every cached handle --

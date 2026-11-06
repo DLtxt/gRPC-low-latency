@@ -17,28 +17,24 @@
 //! nonce                 8 bytes   big-endian u64
 //! ```
 //!
-//! Every string is length-prefixed, because a bare concatenation would let `"ab" + "c"`
-//! and `"a" + "bc"` encode identically. The tag is a domain separator: a signature over a
-//! transfer cannot be passed off as a signature over anything else, and approvals carry a
-//! different tag, so an approval can never double as a transfer signature.
+//! The tag is a domain separator: a signature over a transfer cannot be passed off as a
+//! signature over anything else, and approvals and releases carry different tags, so
+//! neither can double as a transfer signature. The other rules -- length-prefixed strings,
+//! a plain-ASCII alphabet per field, strict decoding -- are shared with the release format
+//! and live in `crate::encoding`.
 //!
 //! This is the project's own format, not a real chain's transaction encoding. A
 //! deployment signing Ethereum or Bitcoin transactions would replace `encode` with that
 //! chain's encoder and keep everything around it; the property that matters -- the
 //! signer builds the bytes from fields it checked -- does not depend on the format.
-//!
-//! Strings are restricted to plain ASCII on purpose. An approver is shown what these
-//! bytes say, and a destination carrying a Cyrillic lookalike, a right-to-left override
-//! or a zero-width space would display as something it is not.
 
 use sha2::{Digest, Sha256};
 
+use crate::approval::Statement;
+use crate::encoding::{check_key_label, invalid, put_str, Field, FormatError, Reader};
+
 /// Domain tag for transfers. Also the format version: a v2 would get a new tag.
 pub const TRANSFER_TAG: &[u8; 16] = b"gll-transfer-v1\0";
-
-/// Domain tag for approvals. Distinct from `TRANSFER_TAG`, so an approver's signature
-/// over a transfer can never be replayed as a signature *of* that transfer.
-pub const APPROVAL_TAG: &[u8; 16] = b"gll-approval-v1\0";
 
 /// The only kind of thing a transfer key can sign.
 ///
@@ -54,21 +50,6 @@ pub const MAX_DECIMALS: u8 = 30;
 /// Longest decimal amount string accepted. A u128 has 39 digits; this leaves room for a
 /// decimal point and fraction without letting a caller hand the parser a megabyte.
 const MAX_AMOUNT_LEN: usize = 80;
-
-/// Field rules: maximum length and the characters allowed.
-struct Field {
-    name: &'static str,
-    max_len: usize,
-    allowed: fn(u8) -> bool,
-    description: &'static str,
-}
-
-const KEY_LABEL: Field = Field {
-    name: "key_label",
-    max_len: 64,
-    allowed: |b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'),
-    description: "letters, digits, '.', '_' and '-'",
-};
 
 const CHAIN: Field = Field {
     name: "chain",
@@ -91,59 +72,16 @@ const DESTINATION: Field = Field {
     description: "letters, digits, ':', '.', '_' and '-'",
 };
 
-/// Approver names share the chain alphabet: short, lowercase, unambiguous.
-const APPROVER: Field = Field {
-    name: "approver",
-    max_len: 32,
-    allowed: |b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-',
-    description: "lowercase letters, digits and '-'",
-};
-
-/// A transfer that does not satisfy the format.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{0}")]
-pub struct FormatError(pub String);
-
-fn invalid(message: impl Into<String>) -> FormatError {
-    FormatError(message.into())
-}
-
-fn check(field: &Field, value: &str) -> Result<(), FormatError> {
-    if value.is_empty() || value.len() > field.max_len {
-        return Err(invalid(format!(
-            "{} must be 1 to {} characters",
-            field.name, field.max_len
-        )));
-    }
-    if !value.bytes().all(field.allowed) {
-        // Debug formatting escapes whatever made the value invalid, so the message
-        // cannot itself carry the control characters it is complaining about.
-        return Err(invalid(format!(
-            "{} {value:?} may contain only {}",
-            field.name, field.description
-        )));
-    }
-    Ok(())
-}
-
-pub fn check_key_label(value: &str) -> Result<(), FormatError> {
-    check(&KEY_LABEL, value)
-}
-
 pub fn check_chain(value: &str) -> Result<(), FormatError> {
-    check(&CHAIN, value)
+    CHAIN.check(value)
 }
 
 pub fn check_asset(value: &str) -> Result<(), FormatError> {
-    check(&ASSET, value)
+    ASSET.check(value)
 }
 
 pub fn check_destination(value: &str) -> Result<(), FormatError> {
-    check(&DESTINATION, value)
-}
-
-pub fn check_approver(value: &str) -> Result<(), FormatError> {
-    check(&APPROVER, value)
+    DESTINATION.check(value)
 }
 
 /// A transfer that satisfies the format. Fields are private so that every `Transfer`
@@ -270,7 +208,7 @@ impl Transfer {
     /// same bytes, so there is never a second spelling of a transfer that a verifier
     /// and the signer could read differently.
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
-        let mut reader = Reader { bytes };
+        let mut reader = Reader::new(bytes);
 
         if reader.take(TRANSFER_TAG.len())? != TRANSFER_TAG {
             return Err(invalid("not a gll-transfer-v1 encoding"));
@@ -287,13 +225,7 @@ impl Transfer {
         let destination = reader.string()?;
         let amount = u128::from_be_bytes(reader.array()?);
         let nonce = u64::from_be_bytes(reader.array()?);
-
-        if !reader.bytes.is_empty() {
-            return Err(invalid(format!(
-                "{} trailing bytes after the nonce",
-                reader.bytes.len()
-            )));
-        }
+        reader.finish("nonce")?;
 
         Self::new(
             key_label,
@@ -312,63 +244,17 @@ impl Transfer {
     }
 }
 
-/// Length of the random identifier the proxy gives each hold.
-pub const HOLD_ID_LEN: usize = 16;
-
-/// The bytes an approver signs: the approval tag, the hold's identifier, then the whole
-/// canonical transfer.
-///
-/// The whole transfer rather than its digest, so that a hardware signer can decode and
-/// show what it is approving. A device asked to sign a bare digest has nothing to
-/// display, which is exactly the blind signing the approval step exists to prevent.
-///
-/// The hold identifier is random and fresh for every hold, so an approval counts once,
-/// for one hold. Without it, an approval would cover the transfer's bytes for good: once
-/// a transfer had been approved and signed, anyone who had relayed the approvals could
-/// replay them onto a later request for the identical transfer.
-pub fn approval_message(hold_id: &[u8; HOLD_ID_LEN], canonical_transfer: &[u8]) -> Vec<u8> {
-    let mut message =
-        Vec::with_capacity(APPROVAL_TAG.len() + HOLD_ID_LEN + canonical_transfer.len());
-    message.extend_from_slice(APPROVAL_TAG);
-    message.extend_from_slice(hold_id);
-    message.extend_from_slice(canonical_transfer);
-    message
-}
-
-fn put_str(out: &mut Vec<u8>, value: &str) {
-    // Every string field is validated to at most 128 bytes, so this cannot truncate.
-    debug_assert!(value.len() <= u8::MAX as usize);
-    out.push(value.len() as u8);
-    out.extend_from_slice(value.as_bytes());
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], FormatError> {
-        if self.bytes.len() < n {
-            return Err(invalid("truncated transfer encoding"));
-        }
-        let (head, tail) = self.bytes.split_at(n);
-        self.bytes = tail;
-        Ok(head)
+impl Statement for Transfer {
+    fn encode(&self) -> Vec<u8> {
+        Transfer::encode(self)
     }
 
-    fn byte(&mut self) -> Result<u8, FormatError> {
-        Ok(self.take(1)?[0])
+    fn digest(&self) -> [u8; 32] {
+        Transfer::digest(self)
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], FormatError> {
-        let mut out = [0u8; N];
-        out.copy_from_slice(self.take(N)?);
-        Ok(out)
-    }
-
-    fn string(&mut self) -> Result<&'a str, FormatError> {
-        let len = self.byte()? as usize;
-        std::str::from_utf8(self.take(len)?).map_err(|_| invalid("string field is not UTF-8"))
+    fn summary(&self) -> String {
+        Transfer::summary(self)
     }
 }
 
@@ -444,23 +330,11 @@ pub fn format_amount(amount: u128, decimals: u8) -> String {
     format!("{whole}.{}", fraction.trim_end_matches('0'))
 }
 
-pub fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-pub fn from_hex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::APPROVAL_TAG;
+    use crate::encoding::to_hex;
 
     const WEI: u128 = 1_000_000_000_000_000_000;
 
@@ -587,23 +461,5 @@ mod tests {
         assert_eq!(format_amount(1, 18), "0.000000000000000001");
         assert_eq!(format_amount(150, 2), "1.5");
         assert_eq!(format_amount(42, 0), "42");
-    }
-
-    #[test]
-    fn approval_message_is_tag_then_hold_then_transfer() {
-        let canonical = sample().encode();
-        let hold = [7u8; HOLD_ID_LEN];
-        let message = approval_message(&hold, &canonical);
-        assert_eq!(&message[..16], APPROVAL_TAG);
-        assert_eq!(&message[16..32], &hold);
-        assert_eq!(&message[32..], canonical.as_slice());
-    }
-
-    #[test]
-    fn hex_round_trips() {
-        let bytes = [0x00, 0x7f, 0x80, 0xff];
-        assert_eq!(from_hex(&to_hex(&bytes)).unwrap(), bytes);
-        assert!(from_hex("abc").is_none());
-        assert!(from_hex("zz").is_none());
     }
 }

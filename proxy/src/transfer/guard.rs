@@ -16,18 +16,18 @@
 //! them happen under one lock, so two concurrent requests cannot both see the last of
 //! the budget and both be signed. The signature itself happens outside the lock; if it
 //! fails, `release` hands the reservation back.
+//!
+//! Holding and approving work as they do for every purpose-bound key, in
+//! `crate::approval`.
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use anyhow::Context;
-use rand::RngCore;
-
-use super::canonical::{self, approval_message, parse_amount, Transfer, HOLD_ID_LEN};
+use super::canonical::{parse_amount, Transfer};
 use super::policy::{KeyRules, TransferPolicy};
-use super::velocity::{Mark, Window};
+use crate::approval::{self, ApprovalRefusal, ApproverKeys, Hold, HoldStatus, HoldStore, Holds};
+use crate::velocity::{Mark, Window};
 
 /// A transfer as the caller described it, before any of it has been checked.
 pub struct TransferRequest<'a> {
@@ -38,7 +38,7 @@ pub struct TransferRequest<'a> {
     pub nonce: u64,
 }
 
-/// Why a transfer, or an approval, was refused.
+/// Why a transfer was refused.
 ///
 /// Messages name what was wrong. As with authorization denials, none of this is secret
 /// from the caller -- they know what they asked for -- and a vague refusal turns a
@@ -73,28 +73,9 @@ pub enum Refusal {
     #[error("this key has signed {limit} transfers in the last minute, its limit")]
     RateLimited { limit: u32 },
 
-    #[error("{limit} transfers are already held for approval on this key")]
-    TooManyHolds { limit: usize },
-
-    #[error("this transfer is held for a different requester")]
-    HeldForAnotherRequester,
-
-    #[error("no held transfer has that digest; it may have expired or been collected")]
-    NoSuchHold,
-
-    /// The approval names a hold that has since been collected, expired, or replaced by
-    /// a new request for the same transfer. The new hold needs approving afresh.
-    #[error("that hold has been collected or replaced; review the transfer again")]
-    StaleHold,
-
-    #[error("'{approver}' is not an approver for '{key_label}'")]
-    NotAnApprover { approver: String, key_label: String },
-
-    #[error("no public key is loaded for approver '{0}'")]
-    ApproverKeyMissing(String),
-
-    #[error("the approval signature does not verify for approver '{0}'")]
-    BadApprovalSignature(String),
+    /// A refusal from holding or collecting it: too many held, or held for someone else.
+    #[error(transparent)]
+    Approval(#[from] ApprovalRefusal),
 
     #[error("transfer state is unavailable after an internal error")]
     Internal,
@@ -111,13 +92,7 @@ impl Refusal {
             Refusal::DestinationNotAllowed { .. } => "destination",
             Refusal::OverMaxPerTransfer { .. } => "over_cap",
             Refusal::RateLimited { .. } => "rate",
-            Refusal::TooManyHolds { .. } => "holds_full",
-            Refusal::HeldForAnotherRequester => "other_requester",
-            Refusal::NoSuchHold => "no_hold",
-            Refusal::StaleHold => "stale_hold",
-            Refusal::NotAnApprover { .. } => "not_approver",
-            Refusal::ApproverKeyMissing(_) => "approver_key_missing",
-            Refusal::BadApprovalSignature(_) => "bad_signature",
+            Refusal::Approval(refusal) => refusal.reason(),
             Refusal::Internal => "internal",
         }
     }
@@ -133,7 +108,7 @@ pub enum Outcome {
         reservation: Reservation,
     },
     /// Held until enough approvers sign off.
-    Held(HoldStatus),
+    Held(HoldStatus<Transfer>),
 }
 
 /// Why a transfer was held.
@@ -155,29 +130,6 @@ impl HoldKind {
     }
 }
 
-/// A held transfer, as reported to requesters and approvers.
-#[derive(Debug, Clone)]
-pub struct HoldStatus {
-    pub transfer: Transfer,
-    /// Fresh for every hold, and part of what approvers sign.
-    pub hold_id: [u8; HOLD_ID_LEN],
-    pub kind: HoldKind,
-    pub reason: String,
-    pub required: usize,
-    pub approved_by: Vec<String>,
-    pub expires_in: Duration,
-}
-
-impl HoldStatus {
-    pub fn received(&self) -> usize {
-        self.approved_by.len()
-    }
-
-    pub fn approved(&self) -> bool {
-        self.received() >= self.required
-    }
-}
-
 /// A signature counted against the rate and the budget before it was made.
 #[derive(Debug)]
 #[must_use = "a reservation must be released if the signature fails"]
@@ -190,7 +142,7 @@ pub struct Reservation {
     /// The hold this signature releases. Put back if signing fails, so a transient
     /// HSM error does not cost the approvers their work. Boxed because it is rare: only
     /// approved transfers carry one, and every other signature should not pay for it.
-    released: Option<Box<([u8; 32], Hold)>>,
+    released: Option<Box<Hold<Transfer>>>,
 }
 
 impl Reservation {
@@ -198,35 +150,8 @@ impl Reservation {
     pub fn approvers(&self) -> Vec<String> {
         self.released
             .as_ref()
-            .map(|released| released.1.approvals.keys().cloned().collect())
+            .map(|hold| hold.approvers())
             .unwrap_or_default()
-    }
-}
-
-#[derive(Debug)]
-struct Hold {
-    transfer: Transfer,
-    id: [u8; HOLD_ID_LEN],
-    requester: Arc<str>,
-    kind: HoldKind,
-    reason: String,
-    expires: Instant,
-    /// Approver name to signature. The signatures are kept, not just counted: they are
-    /// the evidence of who agreed to what.
-    approvals: BTreeMap<String, Vec<u8>>,
-}
-
-impl Hold {
-    fn status(&self, rules: &KeyRules, now: Instant) -> HoldStatus {
-        HoldStatus {
-            transfer: self.transfer.clone(),
-            hold_id: self.id,
-            kind: self.kind,
-            reason: self.reason.clone(),
-            required: rules.quorum,
-            approved_by: self.approvals.keys().cloned().collect(),
-            expires_in: self.expires.saturating_duration_since(now),
-        }
     }
 }
 
@@ -235,7 +160,7 @@ struct KeyState {
     origin: Instant,
     per_minute: Window,
     hourly: HashMap<(String, String), Window>,
-    holds: HashMap<[u8; 32], Hold>,
+    holds: Holds<Transfer>,
 }
 
 impl KeyState {
@@ -244,12 +169,12 @@ impl KeyState {
             origin,
             per_minute: Window::per_minute(origin),
             hourly: HashMap::new(),
-            holds: HashMap::new(),
+            holds: Holds::default(),
         }
     }
 
     fn expire(&mut self, now: Instant) {
-        self.holds.retain(|_, hold| hold.expires > now);
+        self.holds.expire(now);
     }
 
     fn hourly(&mut self, chain: &str, asset: &str) -> &mut Window {
@@ -272,7 +197,7 @@ impl KeyState {
         &mut self,
         transfer: &Transfer,
         now: Instant,
-        released: Option<Box<([u8; 32], Hold)>>,
+        released: Option<Box<Hold<Transfer>>>,
     ) -> Reservation {
         let minute = self.per_minute.add(now, 1);
         let hour = self
@@ -286,70 +211,6 @@ impl KeyState {
             hour,
             released,
         }
-    }
-}
-
-/// Approver public keys, as uncompressed SEC1 points ready for `ring`.
-///
-/// The proxy holds only the public halves. An approval is unforgeable by anything
-/// without the approver's private key -- including this process, and including the
-/// workload that requested the transfer.
-#[derive(Debug, Default)]
-pub struct ApproverKeys {
-    points: HashMap<String, Vec<u8>>,
-}
-
-impl ApproverKeys {
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&mut self, name: &str, key: &p256::PublicKey) {
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
-        self.points.insert(
-            name.to_string(),
-            key.to_encoded_point(false).as_bytes().to_vec(),
-        );
-    }
-
-    /// Read `<dir>/<name>.pub` -- a PEM SubjectPublicKeyInfo for a P-256 key -- for each
-    /// name, returning the keys that loaded and a description of each that did not.
-    ///
-    /// Missing keys are reported rather than fatal. Without an approver's key that
-    /// approver's signatures cannot verify, so held transfers fail closed; the proxy can
-    /// still serve everything else, including transfers inside the auto-sign limits.
-    pub fn load<'a>(dir: &Path, names: impl IntoIterator<Item = &'a str>) -> (Self, Vec<String>) {
-        use p256::pkcs8::DecodePublicKey;
-
-        let mut keys = Self::none();
-        let mut problems = Vec::new();
-        for name in names {
-            let path = dir.join(format!("{name}.pub"));
-            let loaded = std::fs::read_to_string(&path)
-                .with_context(|| format!("cannot read {}", path.display()))
-                .and_then(|pem| {
-                    p256::PublicKey::from_public_key_pem(&pem).map_err(|e| {
-                        anyhow::anyhow!("{} is not a P-256 public key: {e}", path.display())
-                    })
-                });
-            match loaded {
-                Ok(key) => keys.insert(name, &key),
-                Err(e) => problems.push(format!("approver '{name}': {e:#}")),
-            }
-        }
-        (keys, problems)
-    }
-
-    pub fn len(&self) -> usize {
-        self.points.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.points.is_empty()
-    }
-
-    fn get(&self, name: &str) -> Option<&[u8]> {
-        self.points.get(name).map(Vec::as_slice)
     }
 }
 
@@ -446,17 +307,17 @@ impl TransferGuard {
 
         // Already held: report on it, or release it once approved.
         if let Some(hold) = key_state.holds.get(&digest) {
-            if hold.requester != *requester {
-                return Err(Refusal::HeldForAnotherRequester);
+            if hold.requester() != requester.as_ref() {
+                return Err(ApprovalRefusal::HeldForAnotherRequester.into());
             }
-            if hold.approvals.len() < rules.quorum {
-                return Ok(Outcome::Held(hold.status(rules, now)));
+            if hold.approval_count() < rules.holds.quorum {
+                return Ok(Outcome::Held(hold.status(rules.holds.quorum, now)));
             }
             // Approval lifts the hold, not the rate: an approved transfer is still a
             // signature, and still counts against the minute.
             key_state.check_rate(rules, now)?;
-            let hold = key_state.holds.remove(&digest).ok_or(Refusal::Internal)?;
-            let reservation = key_state.reserve(&transfer, now, Some(Box::new((digest, hold))));
+            let hold = key_state.holds.take(&digest).ok_or(Refusal::Internal)?;
+            let reservation = key_state.reserve(&transfer, now, Some(Box::new(hold)));
             return Ok(Outcome::Sign {
                 transfer,
                 reservation,
@@ -495,24 +356,14 @@ impl TransferGuard {
         };
 
         if let Some((kind, reason)) = hold_reason {
-            if key_state.holds.len() >= rules.max_pending {
-                return Err(Refusal::TooManyHolds {
-                    limit: rules.max_pending,
-                });
-            }
-            let mut id = [0u8; HOLD_ID_LEN];
-            rand::rngs::OsRng.fill_bytes(&mut id);
-            let hold = Hold {
+            let status = key_state.holds.open(
                 transfer,
-                id,
-                requester: Arc::clone(requester),
-                kind,
+                requester,
+                kind.as_str(),
                 reason,
-                expires: now + rules.hold_ttl,
-                approvals: BTreeMap::new(),
-            };
-            let status = hold.status(rules, now);
-            key_state.holds.insert(digest, hold);
+                &rules.holds,
+                now,
+            )?;
             return Ok(Outcome::Held(status));
         }
 
@@ -537,10 +388,15 @@ impl TransferGuard {
         key_state
             .hourly(&reservation.chain, &reservation.asset)
             .remove(reservation.hour);
-        if let Some(released) = reservation.released {
-            let (digest, hold) = *released;
-            key_state.holds.insert(digest, hold);
+        if let Some(hold) = reservation.released {
+            key_state.holds.restore(*hold);
         }
+    }
+
+    fn approval_rules(&self, key_label: &str) -> Result<&KeyRules, ApprovalRefusal> {
+        self.policy
+            .key(key_label)
+            .ok_or_else(|| ApprovalRefusal::NotApprovable(key_label.to_string()))
     }
 
     /// A held transfer, for an approver to review.
@@ -549,22 +405,12 @@ impl TransferGuard {
         key_label: &str,
         digest: &[u8; 32],
         now: Instant,
-    ) -> Result<HoldStatus, Refusal> {
-        let rules = self
-            .policy
-            .key(key_label)
-            .ok_or_else(|| Refusal::NotATransferKey(key_label.to_string()))?;
-        let mut state = self.lock()?;
-        let hold = live_hold(&mut state, key_label, digest, now)?;
-        Ok(hold.status(rules, now))
+    ) -> Result<HoldStatus<Transfer>, ApprovalRefusal> {
+        let rules = self.approval_rules(key_label)?;
+        approval::pending(self, key_label, &rules.holds, digest, now)
     }
 
-    /// Record one approver's signature on a held transfer.
-    ///
-    /// The signature must verify over the approval message for *this* hold of *this*
-    /// transfer, under the key registered for *this* approver. A signature made for
-    /// another transfer, for an earlier hold of the same one, by another approver's key,
-    /// or over anything but the full transfer, does not count.
+    /// Record one approver's signature on a held transfer; see `approval::approve`.
     pub fn approve(
         &self,
         key_label: &str,
@@ -573,54 +419,19 @@ impl TransferGuard {
         approver: &str,
         signature: &[u8],
         now: Instant,
-    ) -> Result<HoldStatus, Refusal> {
-        canonical::check_approver(approver).map_err(|e| Refusal::Invalid(e.to_string()))?;
-        let rules = self
-            .policy
-            .key(key_label)
-            .ok_or_else(|| Refusal::NotATransferKey(key_label.to_string()))?;
-        if !rules.approvers.contains(approver) {
-            return Err(Refusal::NotAnApprover {
-                approver: approver.to_string(),
-                key_label: key_label.to_string(),
-            });
-        }
-        let point = self
-            .approver_keys
-            .get(approver)
-            .ok_or_else(|| Refusal::ApproverKeyMissing(approver.to_string()))?;
-
-        // The bytes under the lock, the signature check outside it, so a stream of
-        // bogus approvals cannot hold up transfers behind ECDSA verification.
-        let (id, canonical) = {
-            let mut state = self.lock()?;
-            let hold = live_hold(&mut state, key_label, digest, now)?;
-            (hold.id, hold.transfer.encode())
-        };
-        if hold_id != id.as_slice() {
-            return Err(Refusal::StaleHold);
-        }
-
-        let message = approval_message(&id, &canonical);
-        let key = ring::signature::UnparsedPublicKey::new(
-            &ring::signature::ECDSA_P256_SHA256_FIXED,
-            point,
-        );
-        if key.verify(&message, signature).is_err() {
-            return Err(Refusal::BadApprovalSignature(approver.to_string()));
-        }
-
-        // Looked up again: meanwhile the hold may have lapsed, or been collected and
-        // requested anew. A new hold has a new identifier, which this signature does
-        // not cover.
-        let mut state = self.lock()?;
-        let hold = live_hold(&mut state, key_label, digest, now)?;
-        if hold.id != id {
-            return Err(Refusal::StaleHold);
-        }
-        hold.approvals
-            .insert(approver.to_string(), signature.to_vec());
-        Ok(hold.status(rules, now))
+    ) -> Result<HoldStatus<Transfer>, ApprovalRefusal> {
+        let rules = self.approval_rules(key_label)?;
+        approval::approve(
+            self,
+            &self.approver_keys,
+            key_label,
+            &rules.holds,
+            digest,
+            hold_id,
+            approver,
+            signature,
+            now,
+        )
     }
 
     /// Each configured asset's signed outflow over the last hour, against its budget.
@@ -685,22 +496,27 @@ fn whole_units(amount: u128, decimals: u8) -> f64 {
     amount as f64 / 10f64.powi(i32::from(decimals))
 }
 
-fn live_hold<'a>(
-    state: &'a mut HashMap<String, KeyState>,
-    key_label: &str,
-    digest: &[u8; 32],
-    now: Instant,
-) -> Result<&'a mut Hold, Refusal> {
-    let key_state = state.get_mut(key_label).ok_or(Refusal::NoSuchHold)?;
-    key_state.expire(now);
-    key_state.holds.get_mut(digest).ok_or(Refusal::NoSuchHold)
+impl HoldStore<Transfer> for TransferGuard {
+    fn with_holds<R>(
+        &self,
+        key_label: &str,
+        f: impl FnOnce(&mut Holds<Transfer>) -> Result<R, ApprovalRefusal>,
+    ) -> Result<R, ApprovalRefusal> {
+        let mut state = self.state.lock().map_err(|_| ApprovalRefusal::Internal)?;
+        let key_state = state
+            .get_mut(key_label)
+            .ok_or(ApprovalRefusal::NoSuchHold)?;
+        f(&mut key_state.holds)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::approval_message;
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature, SigningKey};
+    use std::time::Duration;
 
     const POLICY: &str = r#"
 [[approvers]]
@@ -787,7 +603,7 @@ destinations = ["0xc01d", "0x5e77"]
                 .submit(requester, "transfer-key", &request, self.at(secs))
         }
 
-        fn held(&self, amount: &str, nonce: u64) -> HoldStatus {
+        fn held(&self, amount: &str, nonce: u64) -> HoldStatus<Transfer> {
             match self.submit("0xc01d", amount, nonce, 0).unwrap() {
                 Outcome::Held(status) => status,
                 Outcome::Sign { .. } => panic!("expected a hold"),
@@ -797,15 +613,15 @@ destinations = ["0xc01d", "0x5e77"]
         /// Approve as `approver`, signing with `signer`'s key.
         fn approve(
             &self,
-            status: &HoldStatus,
+            status: &HoldStatus<Transfer>,
             approver: &str,
             signer: &str,
-        ) -> Result<HoldStatus, Refusal> {
-            let message = approval_message(&status.hold_id, &status.transfer.encode());
+        ) -> Result<HoldStatus<Transfer>, ApprovalRefusal> {
+            let message = approval_message(&status.hold_id, &status.statement.encode());
             let signature: Signature = self.signers[signer].sign(&message);
             self.guard.approve(
                 "transfer-key",
-                &status.transfer.digest(),
+                &status.statement.digest(),
                 &status.hold_id,
                 approver,
                 &signature.to_bytes(),
@@ -821,7 +637,7 @@ destinations = ["0xc01d", "0x5e77"]
         }
     }
 
-    fn holds(outcome: Result<Outcome, Refusal>) -> HoldStatus {
+    fn holds(outcome: Result<Outcome, Refusal>) -> HoldStatus<Transfer> {
         match outcome {
             Ok(Outcome::Held(status)) => status,
             other => panic!("expected a hold, got {other:?}"),
@@ -927,7 +743,7 @@ destinations = ["0xc01d", "0x5e77"]
     fn approvals_cannot_be_replayed_onto_a_new_hold_of_the_same_transfer() {
         let f = Fixture::new();
         let first = f.held("25", 1);
-        let message = approval_message(&first.hold_id, &first.transfer.encode());
+        let message = approval_message(&first.hold_id, &first.statement.encode());
         let spent: Vec<(&str, Signature)> = ["alice", "bob"]
             .into_iter()
             .map(|name| (name, f.signers[name].sign(&message)))
@@ -936,7 +752,7 @@ destinations = ["0xc01d", "0x5e77"]
             f.guard
                 .approve(
                     "transfer-key",
-                    &first.transfer.digest(),
+                    &first.statement.digest(),
                     &first.hold_id,
                     name,
                     &signature.to_bytes(),
@@ -947,11 +763,11 @@ destinations = ["0xc01d", "0x5e77"]
         let _ = signs(f.submit("0xc01d", "25", 1, 2));
 
         let second = holds(f.submit("0xc01d", "25", 1, 3));
-        assert_eq!(second.transfer.digest(), first.transfer.digest());
+        assert_eq!(second.statement.digest(), first.statement.digest());
         assert_ne!(second.hold_id, first.hold_id);
 
         for (name, signature) in &spent {
-            let digest = second.transfer.digest();
+            let digest = second.statement.digest();
             // Naming the old hold: it is gone.
             assert_eq!(
                 f.guard
@@ -964,7 +780,7 @@ destinations = ["0xc01d", "0x5e77"]
                         f.at(4)
                     )
                     .unwrap_err(),
-                Refusal::StaleHold
+                ApprovalRefusal::StaleHold
             );
             // Naming the new one: the signature does not cover it.
             assert_eq!(
@@ -978,7 +794,7 @@ destinations = ["0xc01d", "0x5e77"]
                         f.at(4)
                     )
                     .unwrap_err(),
-                Refusal::BadApprovalSignature(name.to_string())
+                ApprovalRefusal::BadApprovalSignature(name.to_string())
             );
         }
         assert_eq!(holds(f.submit("0xc01d", "25", 1, 5)).received(), 0);
@@ -999,7 +815,7 @@ destinations = ["0xc01d", "0x5e77"]
         let status = f.held("25", 1);
         assert_eq!(
             f.approve(&status, "carol", "alice").unwrap_err(),
-            Refusal::BadApprovalSignature("carol".to_string())
+            ApprovalRefusal::BadApprovalSignature("carol".to_string())
         );
     }
 
@@ -1009,18 +825,18 @@ destinations = ["0xc01d", "0x5e77"]
         let target = f.held("25", 1);
         let other = f.held("25", 2);
 
-        let message = approval_message(&target.hold_id, &other.transfer.encode());
+        let message = approval_message(&target.hold_id, &other.statement.encode());
         let signature: Signature = f.signers["alice"].sign(&message);
         assert!(matches!(
             f.guard.approve(
                 "transfer-key",
-                &target.transfer.digest(),
+                &target.statement.digest(),
                 &target.hold_id,
                 "alice",
                 &signature.to_bytes(),
                 f.at(1)
             ),
-            Err(Refusal::BadApprovalSignature(_))
+            Err(ApprovalRefusal::BadApprovalSignature(_))
         ));
     }
 
@@ -1029,17 +845,17 @@ destinations = ["0xc01d", "0x5e77"]
     fn rejects_a_signature_without_the_approval_tag() {
         let f = Fixture::new();
         let status = f.held("25", 1);
-        let signature: Signature = f.signers["alice"].sign(&status.transfer.encode());
+        let signature: Signature = f.signers["alice"].sign(&status.statement.encode());
         assert!(matches!(
             f.guard.approve(
                 "transfer-key",
-                &status.transfer.digest(),
+                &status.statement.digest(),
                 &status.hold_id,
                 "alice",
                 &signature.to_bytes(),
                 f.at(1)
             ),
-            Err(Refusal::BadApprovalSignature(_))
+            Err(ApprovalRefusal::BadApprovalSignature(_))
         ));
     }
 
@@ -1049,7 +865,7 @@ destinations = ["0xc01d", "0x5e77"]
         let status = f.held("25", 1);
         assert!(matches!(
             f.approve(&status, "dave", "dave"),
-            Err(Refusal::NotAnApprover { .. })
+            Err(ApprovalRefusal::NotAnApprover { .. })
         ));
     }
 
@@ -1060,7 +876,7 @@ destinations = ["0xc01d", "0x5e77"]
         let batch: Arc<str> = Arc::from("batch");
         assert_eq!(
             f.submit_as(&batch, "0xc01d", "25", 1, 1).unwrap_err(),
-            Refusal::HeldForAnotherRequester
+            Refusal::Approval(ApprovalRefusal::HeldForAnotherRequester)
         );
     }
 
@@ -1070,13 +886,13 @@ destinations = ["0xc01d", "0x5e77"]
         let status = f.held("25", 1);
         assert!(f
             .guard
-            .pending("transfer-key", &status.transfer.digest(), f.at(599))
+            .pending("transfer-key", &status.statement.digest(), f.at(599))
             .is_ok());
         assert_eq!(
             f.guard
-                .pending("transfer-key", &status.transfer.digest(), f.at(600))
+                .pending("transfer-key", &status.statement.digest(), f.at(600))
                 .unwrap_err(),
-            Refusal::NoSuchHold
+            ApprovalRefusal::NoSuchHold
         );
     }
 
@@ -1088,7 +904,9 @@ destinations = ["0xc01d", "0x5e77"]
         }
         assert!(matches!(
             f.submit("0xc01d", "25", 3, 0),
-            Err(Refusal::TooManyHolds { limit: 3 })
+            Err(Refusal::Approval(ApprovalRefusal::TooManyHolds {
+                limit: 3
+            }))
         ));
     }
 
@@ -1153,7 +971,7 @@ destinations = ["0xc01d", "0x5e77"]
         f.guard.release(reservation);
         assert!(f
             .guard
-            .pending("transfer-key", &status.transfer.digest(), f.at(2))
+            .pending("transfer-key", &status.statement.digest(), f.at(2))
             .unwrap()
             .approved());
     }

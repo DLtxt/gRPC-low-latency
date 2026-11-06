@@ -15,6 +15,6 @@ pub use errors::PoolError;
 pub use job::{JobRequest, JobResponse};
 pub use pool::{Pool, PoolConfig};
 pub use session::{
-    find_object, find_object_pair, is_transfer_only, load_module, open_token, TokenConfig,
-    TRANSFER_ONLY_ID,
+    find_object, find_object_pair, load_module, open_token, purpose_of, Purpose, TokenConfig,
+    RELEASE_ONLY_ID, TRANSFER_ONLY_ID,
 };

@@ -110,7 +110,7 @@ approve() { expect "$1" "$2" -- --as treasury approve --key "${KEY}" --digest "$
 step "1. A compromised caller asks the transfer key to sign a digest it made up"
 # Refused by authorization first: nothing is granted 'sign' on a transfer key. Under
 # that, the token marks the key transfer-only and the workers refuse a blind signature
-# whatever the policy says (tests/transfer.rs covers that layer directly).
+# whatever the policy says (tests/purpose_keys.rs covers that layer directly).
 expect 1 "PermissionDenied" -- --as payments raw-sign --key "${KEY}" \
     --digest "$(printf 'attacker-chosen' | openssl dgst -sha256 -r | cut -d' ' -f1)"
 
@@ -180,7 +180,7 @@ sign 2 "auto-sign budget" --to "${RESERVE}" --amount 9 --nonce 7
 step "12. What the proxy recorded"
 sleep 1.2 # the outflow gauge is sampled once a second
 curl -fsS "http://127.0.0.1:${METRICS_PORT}/metrics" \
-    | grep -E '^hsm_transfer(s_total|_approvals_total|s_pending|_outflow_last_hour)' \
+    | grep -E '^hsm_(transfers_total|transfers_pending|transfer_outflow_last_hour|approvals_total)' \
     | sed 's/^/    /'
 echo
 grep -E ' audit: ' "${LOG}" | sed -E 's/^[^ ]+ +//; s/^/    /' | cut -c1-200

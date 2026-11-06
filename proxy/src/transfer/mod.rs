@@ -20,10 +20,12 @@
 //!   key can sign.
 //! * `policy` -- per key and asset: a destination allowlist, a per-transfer cap, a
 //!   per-minute rate, an hourly auto-sign budget, and who may approve what is held.
-//! * `velocity` -- the rolling windows behind the rate and the budget.
 //! * `guard` -- applies all of it: sign now, hold for approval, or refuse.
 //!
-//! The key itself is marked transfer-only on the token (`pkcs11::TRANSFER_ONLY_ID`), and
+//! Shared with release keys (`crate::release`, M11): the rolling windows behind the rate
+//! and the budget (`crate::velocity`), and holding and approving (`crate::approval`).
+//!
+//! The key itself is marked transfer-only on the token (`pkcs11::Purpose::Transfer`), and
 //! the pool's workers refuse to blind-sign with a marked key. So the generic `Sign` RPC
 //! cannot reach it through any handler, proxy mode, or policy file.
 //!
@@ -33,20 +35,7 @@
 pub mod canonical;
 pub mod guard;
 pub mod policy;
-pub mod velocity;
 
 pub use canonical::Transfer;
-pub use guard::{
-    ApproverKeys, HoldKind, HoldStatus, Outcome, Outflow, Refusal, Reservation, TransferGuard,
-    TransferRequest,
-};
+pub use guard::{HoldKind, Outcome, Outflow, Refusal, Reservation, TransferGuard, TransferRequest};
 pub use policy::TransferPolicy;
-
-/// Why the generic `Sign` RPC refuses a transfer key. Shared by both backends so the
-/// refusal reads the same whichever one served it.
-pub fn raw_sign_refusal(key_label: &str) -> String {
-    format!(
-        "'{key_label}' is a transfer key: it signs only transfers the proxy has built and \
-         checked itself, through SignTransfer"
-    )
-}

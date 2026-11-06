@@ -227,3 +227,12 @@ jobs:
         run: |
           export PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
           ./scripts/transfer-demo.sh
+
+      - name: Release policy smoke
+        # M11 end to end over mTLS: a blind signature refused, a policy granting one
+        # refused at startup, artifact, channel and one-file-per-version refusals, a
+        # download verified and a tampered one rejected, an approver whose copy differs
+        # refusing to sign, a two-of-three approval for stable, and the hourly cap.
+        run: |
+          export PKCS11_MODULE=/usr/lib/softhsm/libsofthsm2.so
+          ./scripts/release-demo.sh

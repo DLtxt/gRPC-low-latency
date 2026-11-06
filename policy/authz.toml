@@ -41,10 +41,30 @@ grants = [
 # Relays approvals for held transfers. It cannot approve anything itself -- an approval
 # is a signature by an approver's own key, checked against certs/approvers/ -- and it
 # cannot request transfers: the proxy refuses to load a policy giving one identity both
-# sign_transfer and approve_transfer on the same key.
+# sign_transfer and approve on the same key.
 [[workloads]]
 identity = "spiffe://local/ns/default/sa/treasury"
 description = "Treasury console. Shows held transfers to approvers and relays their approvals."
 grants = [
-    { key_label = "demo-transfer-key", operations = ["approve_transfer", "get_public_key"] },
+    { key_label = "demo-transfer-key", operations = ["approve", "get_public_key"] },
+]
+
+# The build system (M11). It can ask for a release to be signed and nothing else: the
+# proxy refuses to load a policy granting `sign` on a key in policy/releases.toml, so
+# a compromised CI runner cannot get an arbitrary digest signed with the release key.
+[[workloads]]
+identity = "spiffe://local/ns/default/sa/ci"
+description = "Build system. Requests release signatures for the builds it produces."
+grants = [
+    { key_label = "demo-release-key", operations = ["sign_release", "get_public_key"] },
+]
+
+# Relays approvals for held releases, as treasury does for transfers. Kept apart from
+# ci for the same reason: whoever requests a release cannot also be the channel its
+# approvals arrive through.
+[[workloads]]
+identity = "spiffe://local/ns/default/sa/release-review"
+description = "Release review console. Shows held releases to approvers and relays their approvals."
+grants = [
+    { key_label = "demo-release-key", operations = ["approve", "get_public_key"] },
 ]

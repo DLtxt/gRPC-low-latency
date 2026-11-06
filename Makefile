@@ -5,7 +5,7 @@
 SHELL := /bin/sh
 COMPOSE := docker compose
 
-.PHONY: help env up down logs clean check spike fmt lint test transfer-demo
+.PHONY: help env up down logs clean check spike fmt lint test transfer-demo release-demo
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -19,6 +19,9 @@ certs: ## Generate the local CA, server cert, per-workload client certs, and app
 
 transfer-demo: env certs ## M10: a key that signs only transfers it has checked, end to end
 	@./scripts/transfer-demo.sh
+
+release-demo: env certs ## M11: a key that signs only software releases it has checked, end to end
+	@./scripts/release-demo.sh
 
 up: env certs ## Provision the token and start the full stack (detached)
 	@$(COMPOSE) up --build -d

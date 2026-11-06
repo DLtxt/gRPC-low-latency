@@ -1,4 +1,5 @@
-//! Rolling windows for the per-minute rate and the hourly auto-sign budget.
+//! Rolling windows: the per-minute rate and hourly auto-sign budget of transfer keys,
+//! and the hourly signature cap of release keys.
 //!
 //! Bucketed rather than a log of every transfer. A log grows with throughput, and a
 //! transfer key that is being drained is exactly the case where throughput is highest.

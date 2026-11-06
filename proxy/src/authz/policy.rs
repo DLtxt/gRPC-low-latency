@@ -18,10 +18,12 @@ pub enum Operation {
     GetPublicKey,
     /// Request a transfer from a transfer key (M10).
     SignTransfer,
-    /// Review held transfers and submit approvals for them. Holding this grant does not
-    /// make anyone an approver -- approvals are signatures by keys registered in the
-    /// transfer policy -- it permits relaying them.
-    ApproveTransfer,
+    /// Request a release signature from a release key (M11).
+    SignRelease,
+    /// Review a key's held requests and submit approvals for them. Holding this grant
+    /// does not make anyone an approver -- approvals are signatures by keys registered in
+    /// the transfer or release policy -- it permits relaying them.
+    Approve,
 }
 
 impl Operation {
@@ -33,7 +35,8 @@ impl Operation {
             Operation::Decrypt => "decrypt",
             Operation::GetPublicKey => "get_public_key",
             Operation::SignTransfer => "sign_transfer",
-            Operation::ApproveTransfer => "approve_transfer",
+            Operation::SignRelease => "sign_release",
+            Operation::Approve => "approve",
         }
     }
 }

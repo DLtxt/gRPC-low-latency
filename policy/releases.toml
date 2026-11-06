@@ -1,0 +1,53 @@
+# Release policy (M11): what a release key may sign, and who approves what it holds.
+#
+# The same pattern as policy/transfers.toml, for a key that signs software instead of
+# moving value. A release signature is what an updater checks before it installs
+# something, so whoever can get anything signed with this key can ship anything to
+# every user. A key listed here signs nothing but release statements the proxy built
+# itself -- artifact, version, channel, and the SHA-256 of the file -- checked against
+# the rules below:
+#
+#   artifacts              hard allowlist. Anything else is refused outright.
+#   auto_sign_channels     signed at once, within the hourly cap.
+#   approval_channels      held until `quorum` approvers sign off, every time. There is
+#                          no stable release small enough to wave through.
+#   max_releases_per_hour  signatures per rolling hour, approved or not.
+#
+# A channel in neither list is refused. Whatever the lists say, a version names one
+# file: once 1.4.0 is signed (or held) for one file, it is refused for any other.
+#
+# Approvers are registered here, on the same terms as in transfers.toml: a name, and a
+# P-256 public key read from certs/approvers/<name>.pub. The demo reuses the transfer
+# approvers' keys. That is safe, because an approval signs the full statement and every
+# statement starts with its format's tag, so an approval of a release can never count
+# as an approval of a transfer, or the other way round.
+#
+# Keep this file under change control. Whoever can edit it can add a channel that signs
+# on its own.
+
+[[approvers]]
+name = "alice"
+description = "Release manager"
+
+[[approvers]]
+name = "bob"
+description = "Release manager"
+
+[[approvers]]
+name = "carol"
+description = "Security on-call"
+
+[[keys]]
+key_label = "demo-release-key"
+description = "Demo release key. Signs gll-proxy builds: beta and nightly on their own, stable with two approvers."
+approvers = ["alice", "bob", "carol"]
+quorum = 2
+# Long enough for an approver to fetch the build and hash it for themselves.
+hold_ttl_secs = 3600
+max_pending = 16
+# A release train ships a handful of builds a day, not dozens an hour. A compromised
+# build system minting fresh versions to sign runs into this first.
+max_releases_per_hour = 6
+artifacts = ["gll-proxy"]
+auto_sign_channels = ["nightly", "beta"]
+approval_channels = ["stable"]

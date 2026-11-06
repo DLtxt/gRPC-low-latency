@@ -9,6 +9,7 @@ use std::time::Instant;
 use crate::crypto::SignAlgorithm;
 
 use super::errors::PoolError;
+use super::session::Purpose;
 
 /// Which class of object a label refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,17 +47,19 @@ pub enum JobRequest {
     GetPublicKey {
         key_label: String,
     },
-    /// Sign the SHA-256 digest of a canonical transfer with a transfer-only key.
+    /// Sign the SHA-256 digest of a canonical transfer or release with a key marked for
+    /// that purpose.
     ///
     /// Separate from `Sign` so the worker can tell the two apart: `Sign` is refused on
-    /// a key marked transfer-only, and this is refused on any key that is not. Only the
-    /// transfer path constructs it, after the guard has checked the transfer.
-    SignTransfer {
+    /// any marked key, and this is refused on any key not marked with `purpose`. Only the
+    /// transfer and release paths construct it, after their guard has checked the request.
+    SignStatement {
+        purpose: Purpose,
         key_label: String,
         digest: [u8; 32],
     },
-    /// Report whether a key is marked transfer-only, so the server can check at startup
-    /// that the transfer policy and the token agree.
+    /// Report which purpose, if any, the token marks a key with, so the server can check
+    /// at startup that the policies and the token agree.
     DescribeKey {
         key_label: String,
     },
@@ -71,7 +74,14 @@ impl JobRequest {
             JobRequest::Encrypt { .. } => "encrypt",
             JobRequest::Decrypt { .. } => "decrypt",
             JobRequest::GetPublicKey { .. } => "get_public_key",
-            JobRequest::SignTransfer { .. } => "sign_transfer",
+            JobRequest::SignStatement {
+                purpose: Purpose::Transfer,
+                ..
+            } => "sign_transfer",
+            JobRequest::SignStatement {
+                purpose: Purpose::Release,
+                ..
+            } => "sign_release",
             JobRequest::DescribeKey { .. } => "describe_key",
         }
     }
@@ -89,7 +99,7 @@ pub enum JobResponse {
         key_type: String,
     },
     KeyDescription {
-        transfer_only: bool,
+        purpose: Option<Purpose>,
     },
 }
 

@@ -9,13 +9,13 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
-use std::time::Duration;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 
 use super::canonical::{self, format_amount, parse_amount};
-use crate::authz::{Operation, Policy as AuthzPolicy};
+use crate::approval::{register_approvers, ApproverEntry, HoldRules};
+use crate::encoding::check_key_label;
 
 /// Default lifetime of a held transfer. Long enough for two people to look at it, short
 /// enough that an approval cannot surface days later for a transfer nobody remembers.
@@ -32,15 +32,6 @@ struct PolicyFile {
     approvers: Vec<ApproverEntry>,
     #[serde(default)]
     keys: Vec<KeyEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApproverEntry {
-    name: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,10 +77,8 @@ fn default_max_pending() -> usize {
 /// Rules for one transfer key.
 #[derive(Debug)]
 pub struct KeyRules {
-    pub approvers: BTreeSet<String>,
-    pub quorum: usize,
-    pub hold_ttl: Duration,
-    pub max_pending: usize,
+    /// Who approves held transfers, and how many must.
+    pub holds: HoldRules,
     /// Signatures per rolling minute, whether or not a transfer was approved first.
     pub max_transfers_per_minute: u32,
     assets: HashMap<(String, String), AssetRules>,
@@ -156,15 +145,7 @@ impl TransferPolicy {
     pub fn parse(text: &str) -> Result<Self> {
         let file: PolicyFile = toml::from_str(text).context("invalid TOML")?;
 
-        let mut approvers = BTreeSet::new();
-        for entry in file.approvers {
-            canonical::check_approver(&entry.name)?;
-            ensure!(
-                approvers.insert(entry.name.clone()),
-                "approver '{}' is registered twice",
-                entry.name
-            );
-        }
+        let approvers = register_approvers(file.approvers)?;
 
         let mut keys = HashMap::new();
         for entry in file.keys {
@@ -198,90 +179,18 @@ impl TransferPolicy {
     pub fn key_count(&self) -> usize {
         self.keys.len()
     }
-
-    /// Check the authorization policy against this one, refusing grants that would
-    /// undo it.
-    ///
-    /// * `sign` on a transfer key is the blind-signing path this whole module exists to
-    ///   close, so granting it is a configuration error, not a policy choice.
-    /// * The workload that requests transfers must not be the one that submits
-    ///   approvals. Approvals are authenticated by the approver's own signature, so this
-    ///   is not what makes them unforgeable -- it keeps the two roles from collapsing
-    ///   into one compromised service holding both.
-    /// * Transfer grants on a key that is not a transfer key would silently do nothing.
-    pub fn check_grants(&self, authz: &AuthzPolicy) -> Result<()> {
-        for label in self.keys.keys() {
-            let raw = authz.identities_granted(label, Operation::Sign);
-            ensure!(
-                raw.is_empty(),
-                "{} granted 'sign' on transfer key '{label}'; transfer keys sign only \
-                 through 'sign_transfer'",
-                raw.join(", ")
-            );
-
-            let requesters: HashSet<_> = authz
-                .identities_granted(label, Operation::SignTransfer)
-                .into_iter()
-                .collect();
-            for identity in authz.identities_granted(label, Operation::ApproveTransfer) {
-                ensure!(
-                    !requesters.contains(identity),
-                    "{identity} is granted both 'sign_transfer' and 'approve_transfer' on \
-                     '{label}'; the workload that requests transfers must not also \
-                     submit their approvals"
-                );
-            }
-        }
-
-        for operation in [Operation::SignTransfer, Operation::ApproveTransfer] {
-            for label in authz.keys_with(operation) {
-                if !self.is_transfer_key(label) {
-                    bail!(
-                        "'{}' is granted on '{label}', which is not a transfer key in the \
-                         transfer policy",
-                        operation.as_str()
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
 
 fn compile_key(entry: KeyEntry, registered: &BTreeSet<String>) -> Result<KeyRules> {
-    canonical::check_key_label(&entry.key_label)?;
-
-    ensure!(!entry.approvers.is_empty(), "approvers must not be empty");
-    let mut approvers = BTreeSet::new();
-    for name in entry.approvers {
-        ensure!(
-            registered.contains(&name),
-            "approver '{name}' is not registered under [[approvers]]"
-        );
-        ensure!(
-            approvers.insert(name.clone()),
-            "approver '{name}' is listed twice"
-        );
-    }
-    ensure!(
-        (1..=approvers.len()).contains(&entry.quorum),
-        "quorum must be between 1 and the number of approvers ({}), got {}",
-        approvers.len(),
-        entry.quorum
-    );
-    if entry.quorum == 1 {
-        tracing::warn!(
-            key = %entry.key_label,
-            "transfer key has quorum 1: a single approver can release any held transfer"
-        );
-    }
-
-    ensure!(
-        (1..=86_400).contains(&entry.hold_ttl_secs),
-        "hold_ttl_secs must be between 1 and 86400"
-    );
-    ensure!(entry.max_pending >= 1, "max_pending must be at least 1");
+    check_key_label(&entry.key_label)?;
+    let holds = HoldRules::compile(
+        &entry.key_label,
+        entry.approvers,
+        entry.quorum,
+        entry.hold_ttl_secs,
+        entry.max_pending,
+        registered,
+    )?;
     ensure!(
         entry.max_transfers_per_minute >= 1,
         "max_transfers_per_minute must be at least 1"
@@ -301,10 +210,7 @@ fn compile_key(entry: KeyEntry, registered: &BTreeSet<String>) -> Result<KeyRule
     }
 
     Ok(KeyRules {
-        approvers,
-        quorum: entry.quorum,
-        hold_ttl: Duration::from_secs(entry.hold_ttl_secs),
-        max_pending: entry.max_pending,
+        holds,
         max_transfers_per_minute: entry.max_transfers_per_minute,
         assets,
     })
@@ -384,17 +290,6 @@ approval_above = "10"
 auto_sign_per_hour = "50"
 destinations = ["0xc01d", "0x5e77"]
 "#;
-
-    /// The policies the repository ships must load, and must agree with each other.
-    /// Otherwise the first anyone hears of a mismatch is the proxy refusing to start.
-    #[test]
-    fn shipped_policies_load_and_agree() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let transfers = TransferPolicy::load(root.join("policy/transfers.toml")).unwrap();
-        let authz = AuthzPolicy::load(root.join("policy/authz.toml")).unwrap();
-        transfers.check_grants(&authz).unwrap();
-        assert!(transfers.is_transfer_key("demo-transfer-key"));
-    }
 
     fn with(replace: &str, by: &str) -> String {
         assert!(
@@ -481,50 +376,5 @@ destinations = ["0xc01d", "0x5e77"]
     fn rejects_duplicate_keys() {
         let doubled = format!("{SAMPLE}\n{}", &SAMPLE[SAMPLE.find("[[keys]]").unwrap()..]);
         assert!(error(&doubled).contains("configured twice"));
-    }
-
-    const AUTHZ: &str = r#"
-[[workloads]]
-identity = "payments"
-grants = [{ key_label = "transfer-key", operations = ["sign_transfer", "verify"] }]
-
-[[workloads]]
-identity = "treasury"
-grants = [{ key_label = "transfer-key", operations = ["approve_transfer"] }]
-"#;
-
-    fn check(authz: &str) -> Result<()> {
-        let policy = TransferPolicy::parse(SAMPLE).unwrap();
-        policy.check_grants(&AuthzPolicy::parse(authz).unwrap())
-    }
-
-    #[test]
-    fn accepts_separate_requester_and_approver() {
-        check(AUTHZ).unwrap();
-    }
-
-    /// The blind-signing path must not be grantable on a transfer key at all.
-    #[test]
-    fn rejects_raw_sign_grant_on_transfer_key() {
-        let authz = AUTHZ.replace(r#"["sign_transfer", "verify"]"#, r#"["sign", "verify"]"#);
-        assert!(format!("{:#}", check(&authz).unwrap_err()).contains("'sign'"));
-    }
-
-    #[test]
-    fn rejects_requester_that_also_approves() {
-        let authz = AUTHZ.replace(
-            r#"["sign_transfer", "verify"]"#,
-            r#"["sign_transfer", "approve_transfer"]"#,
-        );
-        assert!(format!("{:#}", check(&authz).unwrap_err()).contains("both"));
-    }
-
-    #[test]
-    fn rejects_transfer_grant_on_ordinary_key() {
-        let authz = format!(
-            "{AUTHZ}\n[[workloads]]\nidentity = \"batch\"\ngrants = [{{ key_label = \
-             \"demo-ec-p256\", operations = [\"sign_transfer\"] }}]\n"
-        );
-        assert!(format!("{:#}", check(&authz).unwrap_err()).contains("not a transfer key"));
     }
 }

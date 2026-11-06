@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generate a local CA, a server certificate, one certificate per demo workload, and a
-# signing key per transfer approver (M10).
+# signing key per approver (M10, M11).
 #
 # plan.md 4.5 specifies mkcert; this uses OpenSSL instead so the project depends on
 # nothing beyond what is already installed. The output is equivalent: a private CA that
@@ -19,13 +19,15 @@ TRUST_DOMAIN="${TRUST_DOMAIN:-spiffe://local/ns/default/sa}"
 
 # Workload identities. The third is deliberately under-privileged: policy/authz.toml
 # denies it demo-rsa-2048 so the demo can show a real authorization failure rather than
-# describing one (plan.md M4 exit criterion). treasury relays transfer approvals (M10).
-WORKLOADS="${WORKLOADS:-payments reporting batch treasury}"
+# describing one (plan.md M4 exit criterion). treasury relays transfer approvals (M10);
+# ci requests release signatures and release-review relays their approvals (M11).
+WORKLOADS="${WORKLOADS:-payments reporting batch treasury ci release-review}"
 
-# Transfer approvers, as named in policy/transfers.toml. Their private keys go to
-# APPROVER_KEY_DIR, deliberately not CERT_DIR: certs/ is mounted into the proxy
-# container, and an approval key the proxy can read is not an independent approval.
-# Only the public halves go to CERT_DIR/approvers, which is where the proxy looks.
+# Approvers, as named in policy/transfers.toml and policy/releases.toml. Their private
+# keys go to APPROVER_KEY_DIR, deliberately not CERT_DIR: certs/ is mounted into the
+# proxy container, and an approval key the proxy can read is not an independent
+# approval. Only the public halves go to CERT_DIR/approvers, which is where the proxy
+# looks.
 APPROVERS="${APPROVERS:-alice bob carol}"
 APPROVER_KEY_DIR="${APPROVER_KEY_DIR:-.local/approvers}"
 
@@ -103,7 +105,7 @@ EXT
         -out "${CERT_DIR}/${WORKLOAD}.crt" 2>/dev/null
 done
 
-# --- Transfer approvers (M10) -------------------------------------------------
+# --- Approvers (M10, M11) -----------------------------------------------------
 # A plain P-256 key pair each, not a certificate: the proxy pins each approver's public
 # key by name in its own configuration rather than trusting whatever the CA signs, so
 # a CA compromise does not mint approvers. In this demo the private keys sit on the same

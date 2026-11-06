@@ -12,7 +12,8 @@ option go_package = "github.com/DLtxt/gRPC-low-latency/gen/hsm/v1;hsmv1";
 // in-process once warm. See plan.md 2 and 4.4.
 service HsmService {
   // Produce a signature over whatever the caller sends. Always reaches the HSM.
-  // Refused for transfer keys, which sign only through SignTransfer.
+  // Refused for transfer and release keys, which sign only through SignTransfer and
+  // SignRelease.
   rpc Sign(SignRequest) returns (SignResponse);
 
   // Check a signature. Served in-process from the cached public key when warm.
@@ -36,11 +37,21 @@ service HsmService {
   // held rather than signed. See docs/m10-transfer-keys.md.
   rpc SignTransfer(SignTransferRequest) returns (SignTransferResponse);
 
-  // Fetch a held transfer so an approver can review it.
-  rpc GetPendingTransfer(GetPendingTransferRequest) returns (PendingTransfer);
+  // Sign a software release with a release key (M11).
+  //
+  // As with SignTransfer, the caller never supplies bytes or a hash. It describes the
+  // release -- artifact, version, channel, and the SHA-256 of the file -- and the proxy
+  // builds the statement it signs from fields it has checked against
+  // policy/releases.toml: the artifacts the key releases, the channels it publishes to,
+  // one file per version, and an hourly cap. A release to an approval channel is held
+  // rather than signed. See docs/m11-release-keys.md.
+  rpc SignRelease(SignReleaseRequest) returns (SignReleaseResponse);
 
-  // Add one approver's signature to a held transfer.
-  rpc ApproveTransfer(ApproveTransferRequest) returns (ApproveTransferResponse);
+  // Fetch a held request -- a transfer or a release -- so an approver can review it.
+  rpc GetPendingApproval(GetPendingApprovalRequest) returns (PendingApproval);
+
+  // Add one approver's signature to a held request.
+  rpc Approve(ApproveRequest) returns (ApproveResponse);
 }
 
 enum SignatureMechanism {
@@ -174,19 +185,20 @@ message SignTransferRequest {
   Transfer transfer = 2;
 }
 
-enum TransferStatus {
-  TRANSFER_STATUS_UNSPECIFIED = 0;
+// Whether a transfer or a release was signed, or held for approval.
+enum SigningStatus {
+  SIGNING_STATUS_UNSPECIFIED = 0;
 
   // Signed. `signature` is set.
-  TRANSFER_STATUS_SIGNED = 1;
+  SIGNING_STATUS_SIGNED = 1;
 
-  // Held until enough approvers sign off. Once they have, call SignTransfer again
-  // with the identical transfer to collect the signature.
-  TRANSFER_STATUS_PENDING_APPROVAL = 2;
+  // Held until enough approvers sign off. Once they have, send the identical request
+  // again to collect the signature.
+  SIGNING_STATUS_PENDING_APPROVAL = 2;
 }
 
 message SignTransferResponse {
-  TransferStatus status = 1;
+  SigningStatus status = 1;
 
   // The exact bytes that were signed, or will be once approved. A verifier checks the
   // signature against these with Verify, and decodes them rather than trusting the
@@ -206,17 +218,65 @@ message SignTransferResponse {
   uint32 approvals_received = 7;
 }
 
-message GetPendingTransferRequest {
+// A software release, as the caller describes it.
+//
+// Plain ASCII, as in Transfer: an approver is shown what these fields say.
+message Release {
+  // Artifact name, as configured for the key in policy/releases.toml, e.g. "gll-proxy".
+  string artifact = 1;
+
+  // A strict semantic version, "1.4.0" or "1.4.0-rc.1": no build metadata and no
+  // leading zeros, so that every version has one spelling. A version names one file:
+  // once it is signed for one, the key refuses it for any other.
+  string version = 2;
+
+  // Release channel, e.g. "beta" or "stable". Part of the signed statement, so a build
+  // signed for one channel cannot be presented as a release on another.
+  string channel = 3;
+
+  // SHA-256 of the released file, 32 bytes.
+  bytes sha256 = 4;
+}
+
+message SignReleaseRequest {
+  string key_label = 1;
+  Release release = 2;
+}
+
+message SignReleaseResponse {
+  SigningStatus status = 1;
+
+  // The exact statement that was signed, or will be once approved. Whoever checks the
+  // release rebuilds it from the file and the fields they expect, and verifies the
+  // signature over that rather than trusting this copy.
+  bytes canonical_release = 2;
+
+  // SHA-256 of canonical_release. Identifies a held release to approvers.
+  bytes digest = 3;
+
+  // ECDSA P-256 with SHA-256 over canonical_release, raw r||s. Set when SIGNED.
+  bytes signature = 4;
+
+  // Why the release is held. Set when PENDING_APPROVAL.
+  string hold_reason = 5;
+
+  uint32 approvals_required = 6;
+  uint32 approvals_received = 7;
+}
+
+// Identifies a held transfer or release by its key and digest.
+message GetPendingApprovalRequest {
   string key_label = 1;
   bytes digest = 2;
 }
 
-message PendingTransfer {
+message PendingApproval {
   string key_label = 1;
 
-  // What an approver must decode and check for itself before signing, rather than
-  // trusting any summary of it -- including this message's other fields.
-  bytes canonical_transfer = 2;
+  // The held transfer or release in its canonical encoding, which begins with its
+  // format's tag. What an approver must decode and check for itself before signing,
+  // rather than trusting any summary of it -- including this message's other fields.
+  bytes canonical = 2;
 
   bytes digest = 3;
   string hold_reason = 4;
@@ -225,35 +285,35 @@ message PendingTransfer {
   // Approvers who have signed so far.
   repeated string approved_by = 6;
 
-  // Seconds until the hold lapses and the transfer has to be requested again.
+  // Seconds until the hold lapses and the request has to be made again.
   uint64 expires_in_seconds = 7;
 
   // 16 random bytes, fresh for every hold, and part of what approvers sign. An approval
   // therefore counts for this hold only, and cannot be replayed onto a later hold of
-  // the identical transfer.
+  // the identical request.
   bytes hold_id = 8;
 }
 
-message ApproveTransferRequest {
+message ApproveRequest {
   string key_label = 1;
   bytes digest = 2;
 
-  // Approver name, as registered in policy/transfers.toml.
+  // Approver name, as registered in policy/transfers.toml or policy/releases.toml.
   string approver = 3;
 
   // ECDSA P-256 with SHA-256, raw r||s, by the approver's own key over the approval
-  // message: the 16 bytes "gll-approval-v1\0", then hold_id, then canonical_transfer.
-  // The signature covers the whole transfer rather than its digest so that a hardware
-  // signer can decode and display what it is approving before it signs.
+  // message: the 16 bytes "gll-approval-v1\0", then hold_id, then the canonical
+  // request. The signature covers the whole request rather than its digest so that a
+  // hardware signer can decode and display what it is approving before it signs.
   bytes signature = 4;
 
-  // The hold being approved, from PendingTransfer.hold_id. If the transfer has since
-  // been collected or requested anew, this no longer matches and the approval is
-  // refused, so it has to be reviewed again.
+  // The hold being approved, from PendingApproval.hold_id. If the request has since
+  // been collected or made anew, this no longer matches and the approval is refused,
+  // so it has to be reviewed again.
   bytes hold_id = 5;
 }
 
-message ApproveTransferResponse {
+message ApproveResponse {
   uint32 approvals_required = 1;
   uint32 approvals_received = 2;
 

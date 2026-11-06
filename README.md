@@ -56,6 +56,7 @@ grpcurl -cacert certs/ca.crt -cert certs/payments.crt -key certs/payments.key \
 | `make table` | Current best figures as markdown |
 | `make records` | What the last run beat or regressed against |
 | `make transfer-demo` | A key that signs only transfers it has checked, end to end (M10) |
+| `make release-demo` | A key that signs only software releases it has checked, end to end (M11) |
 | `make clean` | Tear down, including the token volume |
 
 ---
@@ -243,8 +244,10 @@ grants = [
 ]
 ```
 
-The demo ships four identities. One is deliberately under-privileged, so a real denial
-can be demonstrated rather than described, and one relays transfer approvals.
+The demo ships six identities. One is deliberately under-privileged, so a real denial
+can be demonstrated rather than described, one relays transfer approvals, and two sign
+software releases: a build system that requests them, and a review console that relays
+their approvals.
 
 ### Signing what the proxy has read
 
@@ -278,12 +281,30 @@ The proxy is still only a signer: it holds no balances and talks to no blockchai
 cover. Above all, a compromised proxy host can still sign alone; only MPC or multisig
 removes that.
 
+M11 applies the same pattern to software releases, to show it is not about money. A
+**release key** signs only through `SignRelease`, which takes an artifact, a version, a
+channel, and the SHA-256 of the file, checked against
+[`policy/releases.toml`](policy/releases.toml):
+
+- **Refused:** artifacts and channels the key is not configured for, a second file under
+  a version already signed or held, and builds past the hourly cap.
+- **Held for *m*-of-*n* approval:** every stable release. Each approver's tool hashes
+  their own copy of the build and refuses to sign if it differs.
+- **Signed for anyone to check:** the channel is part of the signed statement, so a beta
+  build cannot pass as stable, and a user can verify a download with nothing but the
+  public key.
+
+The marker, the approvals and the rolling windows are the same code as for transfer
+keys. `make release-demo` runs it end to end;
+[`docs/m11-release-keys.md`](docs/m11-release-keys.md) has the design and what it does
+not cover, starting with a poisoned build that the approvers also receive.
+
 ### Threat model
 
 **In scope.** A caller reaching the gRPC endpoint who should not use a given key; a
 caller with no valid certificate; a caller consuming more than their share of capacity; a
 misbehaving client trying to exhaust the service; a compromised caller with a valid grant
-trying to get a transfer key to sign anything but a transfer the policy allows.
+trying to get a transfer or release key to sign anything but what its policy allows.
 
 **Out of scope.** Anything with code execution on the proxy host — the token is in the
 proxy's address space, so that is game over by construction. Physical access. Compromise
@@ -319,7 +340,7 @@ baseline/       Go: direct-PKCS#11 baseline, deliberately naive
 proto/          hsm.v1 service definition
 scripts/        benchmark harness, cert generation, host stamping, result rendering
 deploy/         Prometheus config, provisioned Grafana dashboard
-policy/         authorization and transfer policies
+policy/         authorization, transfer and release policies
 results/        benchmark output (reference/ tracked, local/ ignored)
 docs/           per-milestone findings, including what did not work
 ```
@@ -334,6 +355,7 @@ docs/           per-milestone findings, including what did not work
 | [`docs/reference-runs.md`](docs/reference-runs.md) | ARM vs x86 comparison |
 | [`docs/m0-findings.md`](docs/m0-findings.md) … [`m8`](docs/m8-findings.md) | Per-milestone results, including measurement mistakes |
 | [`docs/m10-transfer-keys.md`](docs/m10-transfer-keys.md) | Signing what the proxy has read: transfer keys, quorum approvals, and their limits |
+| [`docs/m11-release-keys.md`](docs/m11-release-keys.md) | The same pattern for software releases, and what it shares with transfer keys |
 
 The `docs/` findings carry the measurements behind each milestone: token ceilings, the
 cost of each cryptographic primitive, how the worker pool scales with core count, and the

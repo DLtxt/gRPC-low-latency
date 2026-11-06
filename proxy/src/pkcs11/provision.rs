@@ -12,7 +12,7 @@ use cryptoki::object::{Attribute, KeyType, ObjectClass, ObjectHandle};
 use cryptoki::session::Session;
 
 use super::find_object;
-use super::session::{is_transfer_only, TRANSFER_ONLY_ID};
+use super::session::{purpose_of, Purpose};
 
 /// DER encoding of the secp256r1 / prime256v1 named-curve OID (1.2.840.10045.3.1.7).
 const SECP256R1_OID_DER: &[u8] = &[0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
@@ -23,6 +23,8 @@ pub const DEMO_RSA_KEY: &str = "demo-rsa-2048";
 pub const DEMO_AES_KEY: &str = "demo-aes-256";
 /// A transfer key (M10): signs only transfers, through `SignTransfer`.
 pub const DEMO_TRANSFER_KEY: &str = "demo-transfer-key";
+/// A release key (M11): signs only software releases, through `SignRelease`.
+pub const DEMO_RELEASE_KEY: &str = "demo-release-key";
 
 /// Whether a key had to be created or was already there.
 #[derive(Debug, PartialEq, Eq)]
@@ -132,31 +134,38 @@ pub fn ensure_demo_keys(session: &Session) -> Result<Vec<(&'static str, Provisio
         (DEMO_AES_KEY, ensure_aes_key(session, DEMO_AES_KEY)?),
         (
             DEMO_TRANSFER_KEY,
-            ensure_transfer_key(session, DEMO_TRANSFER_KEY)?,
+            ensure_purpose_key(session, DEMO_TRANSFER_KEY, Purpose::Transfer)?,
+        ),
+        (
+            DEMO_RELEASE_KEY,
+            ensure_purpose_key(session, DEMO_RELEASE_KEY, Purpose::Release)?,
         ),
     ])
 }
 
-/// Create a transfer-only P-256 key pair if it is not already present.
+/// Create a P-256 key pair marked with `purpose` if it is not already present.
 ///
-/// The same key type as `ensure_ec_key`, with one difference: both halves carry
-/// `TRANSFER_ONLY_ID` as their `CKA_ID`, which is what makes the proxy refuse to sign
-/// anything with this key except a transfer it built itself. `CKA_MODIFIABLE=false`
-/// means the marker cannot be cleared through PKCS#11, and `CKA_COPYABLE=false` means
-/// it cannot be shed by copying the key into an unmarked twin.
-pub fn ensure_transfer_key(session: &Session, label: &str) -> Result<Provisioned> {
+/// The same key type as `ensure_ec_key`, with one difference: both halves carry the
+/// purpose's marker as their `CKA_ID`, which is what makes the proxy refuse to sign
+/// anything with this key except a request of that purpose it built itself.
+/// `CKA_MODIFIABLE=false` means the marker cannot be changed or cleared through PKCS#11,
+/// and `CKA_COPYABLE=false` means it cannot be shed by copying the key into an unmarked
+/// twin.
+pub fn ensure_purpose_key(session: &Session, label: &str, purpose: Purpose) -> Result<Provisioned> {
     if let Some(existing) = find_object(session, ObjectClass::PRIVATE_KEY, label)? {
-        // An unmarked key under this label would be a blind signer posing as a transfer
-        // key. Refuse rather than report it as present.
+        // An unmarked key under this label would be a blind signer posing as a
+        // purpose-bound key, and a key marked for another purpose would sign the wrong
+        // kind of request. Refuse rather than report it as present.
         ensure!(
-            is_transfer_only(session, existing)?,
-            "a key labelled '{label}' exists but is not marked transfer-only; destroy it \
-             and provision again"
+            purpose_of(session, existing)? == Some(purpose),
+            "a key labelled '{label}' exists but is not marked {}-only; destroy it and \
+             provision again",
+            purpose.as_str()
         );
         return Ok(Provisioned::AlreadyPresent);
     }
 
-    let marker = Attribute::Id(TRANSFER_ONLY_ID.to_vec());
+    let marker = Attribute::Id(purpose.marker().to_vec());
 
     let mut public_template = public_key_base(label);
     public_template.push(Attribute::KeyType(KeyType::EC));
@@ -174,7 +183,12 @@ pub fn ensure_transfer_key(session: &Session, label: &str) -> Result<Provisioned
             &public_template,
             &private_template,
         )
-        .context("C_GenerateKeyPair(CKM_EC_KEY_PAIR_GEN) failed for the transfer key")?;
+        .with_context(|| {
+            format!(
+                "C_GenerateKeyPair(CKM_EC_KEY_PAIR_GEN) failed for the {} key",
+                purpose.as_str()
+            )
+        })?;
 
     Ok(Provisioned::Created)
 }

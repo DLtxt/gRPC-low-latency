@@ -9,7 +9,7 @@
 //! gRPC stack, so the M3 improvement is compared against something real rather than
 //! against a number nobody ran.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::Result;
 use cryptoki::context::Pkcs11;
@@ -21,15 +21,14 @@ use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
 use crate::crypto::{self, SigningInput};
-use crate::pkcs11::{find_object, is_transfer_only, open_token, TokenConfig};
+use crate::pkcs11::{find_object, open_token, purpose_of, Purpose, TokenConfig};
 use crate::proto::v1::{
-    hsm_service_server::HsmService, signing_input, ApproveTransferRequest, ApproveTransferResponse,
+    hsm_service_server::HsmService, signing_input, ApproveRequest, ApproveResponse,
     CipherMechanism, DecryptRequest, DecryptResponse, EncryptRequest, EncryptResponse,
-    GetPendingTransferRequest, GetPublicKeyRequest, GetPublicKeyResponse, PendingTransfer,
-    SignRequest, SignResponse, SignTransferRequest, SignTransferResponse, VerifyRequest,
-    VerifyResponse,
+    GetPendingApprovalRequest, GetPublicKeyRequest, GetPublicKeyResponse, PendingApproval,
+    SignReleaseRequest, SignReleaseResponse, SignRequest, SignResponse, SignTransferRequest,
+    SignTransferResponse, VerifyRequest, VerifyResponse,
 };
-use crate::transfer;
 
 /// AES-GCM parameters. 96-bit IVs are the standard choice and the fast path in most
 /// implementations; 128-bit tags are the maximum GCM offers.
@@ -41,38 +40,35 @@ pub struct SingleSessionService {
     /// PKCS#11 library and invalidates every session derived from it.
     _pkcs11: Pkcs11,
     session: Mutex<Session>,
-    /// Keys the transfer policy names. This baseline serves no transfers, but it must
-    /// still refuse to blind-sign with a transfer key.
-    transfer_keys: HashSet<String>,
-    /// The token's transfer-only marker, per label, read once. Cached so the refusal
-    /// costs this baseline one extra `C_GetAttributeValue` per key rather than per
-    /// request, which would shift the very numbers it exists to produce.
-    transfer_only: std::sync::Mutex<HashMap<String, bool>>,
+    /// Keys the transfer and release policies name. This baseline serves neither, but it
+    /// must still refuse to blind-sign with them.
+    purpose_keys: HashMap<String, Purpose>,
+    /// The token's purpose marker, per label, read once. Cached so the refusal costs this
+    /// baseline one extra `C_GetAttributeValue` per key rather than per request, which
+    /// would shift the very numbers it exists to produce.
+    markers: std::sync::Mutex<HashMap<String, Option<Purpose>>>,
 }
 
 impl SingleSessionService {
-    pub fn connect(
-        config: &TokenConfig,
-        transfer_keys: impl IntoIterator<Item = String>,
-    ) -> Result<Self> {
+    pub fn connect(config: &TokenConfig, purpose_keys: HashMap<String, Purpose>) -> Result<Self> {
         let (pkcs11, _slot, session) = open_token(config)?;
         Ok(Self {
             _pkcs11: pkcs11,
             session: Mutex::new(session),
-            transfer_keys: transfer_keys.into_iter().collect(),
-            transfer_only: std::sync::Mutex::new(HashMap::new()),
+            purpose_keys,
+            markers: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
-    /// Whether `key` carries the token's transfer-only marker, failing closed.
-    fn marked_transfer_only(
+    /// The purpose the token marks `key` with, failing closed.
+    fn marker(
         &self,
         session: &Session,
         label: &str,
         key: ObjectHandle,
-    ) -> Result<bool, Status> {
+    ) -> Result<Option<Purpose>, Status> {
         if let Some(&marked) = self
-            .transfer_only
+            .markers
             .lock()
             .ok()
             .as_ref()
@@ -80,17 +76,16 @@ impl SingleSessionService {
         {
             return Ok(marked);
         }
-        let marked =
-            is_transfer_only(session, key).map_err(|e| hsm_failure("C_GetAttributeValue", e))?;
-        if let Ok(mut cache) = self.transfer_only.lock() {
+        let marked = purpose_of(session, key).map_err(|e| hsm_failure("C_GetAttributeValue", e))?;
+        if let Ok(mut cache) = self.markers.lock() {
             cache.insert(label.to_string(), marked);
         }
         Ok(marked)
     }
 }
 
-fn transfers_unsupported() -> Status {
-    Status::unimplemented("transfer keys are served only by PROXY_MODE=pool")
+fn purpose_bound_unsupported() -> Status {
+    Status::unimplemented("transfer and release keys are served only by PROXY_MODE=pool")
 }
 
 // --- error mapping ------------------------------------------------------------------
@@ -148,10 +143,10 @@ fn require_aes_gcm(mechanism: i32) -> Result<(), Status> {
 impl HsmService for SingleSessionService {
     async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
         let request = request.into_inner();
-        if self.transfer_keys.contains(&request.key_label) {
-            return Err(Status::permission_denied(transfer::raw_sign_refusal(
-                &request.key_label,
-            )));
+        if let Some(purpose) = self.purpose_keys.get(&request.key_label) {
+            return Err(Status::permission_denied(
+                purpose.raw_sign_refusal(&request.key_label),
+            ));
         }
         let input = extract_input(request.input)?;
         let prepared = crypto::prepare(request.mechanism, input).map_err(invalid_argument)?;
@@ -159,10 +154,10 @@ impl HsmService for SingleSessionService {
         // Blocking call under an async lock: the M2 datapoint, replaced in M3.
         let session = self.session.lock().await;
         let private_key = require_object(&session, ObjectClass::PRIVATE_KEY, &request.key_label)?;
-        if self.marked_transfer_only(&session, &request.key_label, private_key)? {
-            return Err(Status::permission_denied(transfer::raw_sign_refusal(
-                &request.key_label,
-            )));
+        if let Some(purpose) = self.marker(&session, &request.key_label, private_key)? {
+            return Err(Status::permission_denied(
+                purpose.raw_sign_refusal(&request.key_label),
+            ));
         }
 
         let signature = session
@@ -309,20 +304,27 @@ impl HsmService for SingleSessionService {
         &self,
         _request: Request<SignTransferRequest>,
     ) -> Result<Response<SignTransferResponse>, Status> {
-        Err(transfers_unsupported())
+        Err(purpose_bound_unsupported())
     }
 
-    async fn get_pending_transfer(
+    async fn sign_release(
         &self,
-        _request: Request<GetPendingTransferRequest>,
-    ) -> Result<Response<PendingTransfer>, Status> {
-        Err(transfers_unsupported())
+        _request: Request<SignReleaseRequest>,
+    ) -> Result<Response<SignReleaseResponse>, Status> {
+        Err(purpose_bound_unsupported())
     }
 
-    async fn approve_transfer(
+    async fn get_pending_approval(
         &self,
-        _request: Request<ApproveTransferRequest>,
-    ) -> Result<Response<ApproveTransferResponse>, Status> {
-        Err(transfers_unsupported())
+        _request: Request<GetPendingApprovalRequest>,
+    ) -> Result<Response<PendingApproval>, Status> {
+        Err(purpose_bound_unsupported())
+    }
+
+    async fn approve(
+        &self,
+        _request: Request<ApproveRequest>,
+    ) -> Result<Response<ApproveResponse>, Status> {
+        Err(purpose_bound_unsupported())
     }
 }

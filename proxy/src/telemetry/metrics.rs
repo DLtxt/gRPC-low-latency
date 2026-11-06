@@ -40,10 +40,16 @@ pub const SESSION_RESETS: &str = "hsm_session_resets_total";
 // Transfer keys (M10). Labelled by key, chain and asset only as configured in the
 // transfer policy, never as a caller wrote them, so the label set stays bounded.
 pub const TRANSFERS_TOTAL: &str = "hsm_transfers_total";
-pub const TRANSFER_APPROVALS: &str = "hsm_transfer_approvals_total";
 pub const TRANSFERS_PENDING: &str = "hsm_transfers_pending";
 pub const TRANSFER_OUTFLOW_HOUR: &str = "hsm_transfer_outflow_last_hour";
 pub const TRANSFER_BUDGET_HOUR: &str = "hsm_transfer_auto_sign_budget_per_hour";
+
+// Release keys (M11), labelled the same way.
+pub const RELEASES_TOTAL: &str = "hsm_releases_total";
+pub const RELEASES_PENDING: &str = "hsm_releases_pending";
+
+// Approvals, for transfer and release keys alike, labelled by purpose.
+pub const APPROVALS_TOTAL: &str = "hsm_approvals_total";
 
 /// End-to-end request latency, in seconds.
 ///
@@ -126,10 +132,6 @@ fn describe() {
         TRANSFERS_TOTAL,
         "Transfer requests by key, outcome (signed, held, refused, failed) and reason"
     );
-    describe_counter!(
-        TRANSFER_APPROVALS,
-        "Approval signatures submitted, by result and reason"
-    );
     describe_gauge!(TRANSFERS_PENDING, "Transfers held for approval");
     describe_gauge!(
         TRANSFER_OUTFLOW_HOUR,
@@ -138,6 +140,15 @@ fn describe() {
     describe_gauge!(
         TRANSFER_BUDGET_HOUR,
         "The hourly auto-sign budget the outflow is measured against"
+    );
+    describe_counter!(
+        RELEASES_TOTAL,
+        "Release requests by key, outcome (signed, held, refused, failed) and reason"
+    );
+    describe_gauge!(RELEASES_PENDING, "Releases held for approval");
+    describe_counter!(
+        APPROVALS_TOTAL,
+        "Approval signatures submitted, by purpose (transfer, release), result and reason"
     );
 }
 
@@ -181,6 +192,7 @@ pub fn spawn_gauge_sampler(
     cache: std::sync::Arc<crate::cache::PublicKeyCache>,
     breaker: std::sync::Arc<crate::resilience::CircuitBreaker>,
     transfers: std::sync::Arc<crate::transfer::TransferGuard>,
+    releases: std::sync::Arc<crate::release::ReleaseGuard>,
     interval: Duration,
 ) {
     use crate::pkcs11::metrics::PoolMetrics;
@@ -230,6 +242,7 @@ pub fn spawn_gauge_sampler(
             // signatures age out of the window, with no event to report it.
             let now = std::time::Instant::now();
             gauge!(TRANSFERS_PENDING).set(transfers.pending_count(now) as f64);
+            gauge!(RELEASES_PENDING).set(releases.pending_count(now) as f64);
             for flow in transfers.outflow_last_hour(now) {
                 gauge!(
                     TRANSFER_OUTFLOW_HOUR,

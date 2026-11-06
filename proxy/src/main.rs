@@ -12,17 +12,20 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use grpc_low_latency_proxy::approval::{self, ApproverKeys};
 use grpc_low_latency_proxy::authz::{Authorizer, Policy};
 use grpc_low_latency_proxy::cache::{CacheConfig, PublicKeyCache};
 use grpc_low_latency_proxy::grpc::{PooledService, SingleSessionService};
+use grpc_low_latency_proxy::pkcs11::Purpose;
 use grpc_low_latency_proxy::pkcs11::{Pool, PoolConfig, TokenConfig};
 use grpc_low_latency_proxy::proto::v1::hsm_service_server::HsmServiceServer;
 use grpc_low_latency_proxy::proto::v1::FILE_DESCRIPTOR_SET;
+use grpc_low_latency_proxy::release::{ReleaseGuard, ReleasePolicy};
 use grpc_low_latency_proxy::resilience::{
     BreakerConfig, CircuitBreaker, RateLimitConfig, RateLimiter,
 };
 use grpc_low_latency_proxy::telemetry;
-use grpc_low_latency_proxy::transfer::{ApproverKeys, TransferGuard, TransferPolicy};
+use grpc_low_latency_proxy::transfer::{TransferGuard, TransferPolicy};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 #[tokio::main]
@@ -57,6 +60,23 @@ async fn main() -> Result<()> {
     // without the other would be security theatre, so they are configured as a unit.
     let security = load_security()?;
     let transfers = load_transfers(security.as_ref())?;
+    let releases = load_releases(security.as_ref())?;
+    let purpose_keys = approval::purpose_map(
+        transfers
+            .policy()
+            .key_labels()
+            .map(|label| (label.to_string(), Purpose::Transfer))
+            .chain(
+                releases
+                    .policy()
+                    .key_labels()
+                    .map(|label| (label.to_string(), Purpose::Release)),
+            ),
+    )?;
+    if let Some(security) = &security {
+        approval::check_grants(security.authorizer.policy(), &purpose_keys)
+            .context("the authorization policy contradicts the transfer or release policy")?;
+    }
     let admission = AdmissionConfig::from_env();
     tracing::info!(
         max_concurrent_streams = ?admission.max_concurrent_streams,
@@ -111,7 +131,7 @@ async fn main() -> Result<()> {
                 tracing::info!("rate limiting disabled (set RATE_LIMIT_PER_SECOND to enable)");
             }
 
-            check_transfer_keys(&pool, &transfers).await?;
+            check_purpose_keys(&pool, &purpose_keys).await?;
 
             metrics::gauge!(telemetry::metrics::WORKERS).set(pool_workers as f64);
             telemetry::spawn_gauge_sampler(
@@ -119,6 +139,7 @@ async fn main() -> Result<()> {
                 Arc::clone(&cache),
                 Arc::clone(&breaker),
                 Arc::clone(&transfers),
+                Arc::clone(&releases),
                 std::time::Duration::from_secs(1),
             );
 
@@ -139,6 +160,7 @@ async fn main() -> Result<()> {
                 rate_limiter.clone(),
                 Arc::clone(&breaker),
                 Arc::clone(&transfers),
+                Arc::clone(&releases),
             );
             tracing::info!(%listen_addr, tls = security.is_some(), "gRPC server listening");
 
@@ -197,10 +219,7 @@ async fn main() -> Result<()> {
         }
 
         "single" => {
-            let service = SingleSessionService::connect(
-                &token,
-                transfers.policy().key_labels().map(str::to_string),
-            )?;
+            let service = SingleSessionService::connect(&token, purpose_keys.clone())?;
             tracing::info!(%listen_addr, tls = security.is_some(), "gRPC server listening (M2 baseline)");
 
             server_builder(&security, &admission)?
@@ -375,11 +394,7 @@ fn load_security() -> Result<Option<Security>> {
 /// asked for by name is an error: a typo in `TRANSFER_POLICY` must not quietly remove
 /// every limit.
 fn load_transfers(security: Option<&Security>) -> Result<Arc<TransferGuard>> {
-    let (path, explicit) = match std::env::var("TRANSFER_POLICY") {
-        Ok(path) => (path, true),
-        Err(_) => ("policy/transfers.toml".to_string(), false),
-    };
-
+    let (path, explicit) = policy_path("TRANSFER_POLICY", "policy/transfers.toml");
     let policy = if explicit || std::path::Path::new(&path).exists() {
         TransferPolicy::load(&path)?
     } else {
@@ -387,7 +402,7 @@ fn load_transfers(security: Option<&Security>) -> Result<Arc<TransferGuard>> {
         TransferPolicy::empty()
     };
 
-    let Some(security) = security else {
+    if security.is_none() {
         if policy.key_count() > 0 {
             tracing::warn!(
                 transfer_keys = policy.key_count(),
@@ -395,25 +410,9 @@ fn load_transfers(security: Option<&Security>) -> Result<Arc<TransferGuard>> {
             );
         }
         return Ok(Arc::new(TransferGuard::new(policy, ApproverKeys::none())));
-    };
-
-    policy
-        .check_grants(security.authorizer.policy())
-        .context("the authorization policy contradicts the transfer policy")?;
-
-    // Public keys only, beside the TLS material. The private halves are the approvers'
-    // own, and the proxy has no setting that would point it at them.
-    let cert_dir = std::env::var("CERT_DIR").unwrap_or_else(|_| "certs".to_string());
-    let key_dir = std::path::Path::new(&cert_dir).join("approvers");
-    let (approver_keys, problems) = ApproverKeys::load(&key_dir, policy.approver_names());
-    for problem in &problems {
-        // Not fatal: without the key, that approver's signatures cannot verify, so a
-        // held transfer fails closed while everything else keeps working.
-        tracing::warn!(
-            "{problem}; held transfers cannot count this approver (run scripts/gen-certs.sh)"
-        );
     }
 
+    let approver_keys = load_approver_keys(policy.approver_names(), "transfers");
     tracing::info!(
         policy = %path,
         transfer_keys = policy.key_count(),
@@ -423,39 +422,102 @@ fn load_transfers(security: Option<&Security>) -> Result<Arc<TransferGuard>> {
     Ok(Arc::new(TransferGuard::new(policy, approver_keys)))
 }
 
-/// Refuse to start if the transfer policy and the token disagree about a key.
+/// Load the release policy, on the same terms as the transfer policy: with mTLS off too,
+/// because it is what makes a release key refuse `Sign`, and an absent file is an error
+/// only when `RELEASE_POLICY` names it.
+fn load_releases(security: Option<&Security>) -> Result<Arc<ReleaseGuard>> {
+    let (path, explicit) = policy_path("RELEASE_POLICY", "policy/releases.toml");
+    let policy = if explicit || std::path::Path::new(&path).exists() {
+        ReleasePolicy::load(&path)?
+    } else {
+        tracing::info!(policy = %path, "no release policy; no keys are release keys");
+        ReleasePolicy::empty()
+    };
+
+    if security.is_none() {
+        if policy.key_count() > 0 {
+            tracing::warn!(
+                release_keys = policy.key_count(),
+                "PROXY_TLS=off: release keys refuse Sign and SignRelease alike"
+            );
+        }
+        return Ok(Arc::new(ReleaseGuard::new(policy, ApproverKeys::none())));
+    }
+
+    let approver_keys = load_approver_keys(policy.approver_names(), "releases");
+    tracing::info!(
+        policy = %path,
+        release_keys = policy.key_count(),
+        approver_keys = approver_keys.len(),
+        "release policy loaded"
+    );
+    Ok(Arc::new(ReleaseGuard::new(policy, approver_keys)))
+}
+
+/// The policy file named by `variable`, and whether it was named explicitly.
+fn policy_path(variable: &str, default: &str) -> (String, bool) {
+    match std::env::var(variable) {
+        Ok(path) => (path, true),
+        Err(_) => (default.to_string(), false),
+    }
+}
+
+/// Approver public keys, from beside the TLS material. The private halves are the
+/// approvers' own, and the proxy has no setting that would point it at them.
+fn load_approver_keys<'a>(names: impl IntoIterator<Item = &'a str>, held: &str) -> ApproverKeys {
+    let cert_dir = std::env::var("CERT_DIR").unwrap_or_else(|_| "certs".to_string());
+    let key_dir = std::path::Path::new(&cert_dir).join("approvers");
+    let (approver_keys, problems) = ApproverKeys::load(&key_dir, names);
+    for problem in &problems {
+        // Not fatal: without the key, that approver's signatures cannot verify, so a
+        // held request fails closed while everything else keeps working.
+        tracing::warn!(
+            "{problem}; held {held} cannot count this approver (run scripts/gen-certs.sh)"
+        );
+    }
+    approver_keys
+}
+
+/// Refuse to start if a policy and the token disagree about a key.
 ///
-/// A key the policy treats as a transfer key but the token does not mark as one would be
-/// refused by `SignTransfer` -- the workers sign transfers only with marked keys -- and
-/// would still be a blind signer to any other software holding the PIN. That is a
-/// provisioning mistake, and startup is the time to find it.
-async fn check_transfer_keys(pool: &Pool, transfers: &TransferGuard) -> Result<()> {
+/// A key a policy treats as a transfer or release key, but the token does not mark for
+/// that purpose, would be refused by its signing RPC -- the workers sign only with keys
+/// marked for the purpose -- and, unmarked, would still be a blind signer to any other
+/// software holding the PIN. That is a provisioning mistake, and startup is the time to
+/// find it.
+async fn check_purpose_keys(
+    pool: &Pool,
+    keys: &std::collections::HashMap<String, Purpose>,
+) -> Result<()> {
     use grpc_low_latency_proxy::pkcs11::{JobRequest, JobResponse, PoolError};
 
-    for label in transfers.policy().key_labels() {
+    for (label, &purpose) in keys {
         let outcome = pool
             .submit(JobRequest::DescribeKey {
-                key_label: label.to_string(),
+                key_label: label.clone(),
             })
             .await;
         match outcome {
-            Ok(JobResponse::KeyDescription {
-                transfer_only: true,
-            }) => tracing::info!(key = label, "transfer key is marked transfer-only"),
-            Ok(JobResponse::KeyDescription {
-                transfer_only: false,
-            }) => anyhow::bail!(
-                "'{label}' is a transfer key in the transfer policy, but the token does not \
-                 mark it transfer-only; provision it with `provision`, or remove it from \
-                 the policy"
+            Ok(JobResponse::KeyDescription { purpose: marked }) if marked == Some(purpose) => {
+                tracing::info!(key = %label, purpose = purpose.as_str(), "key is marked for its purpose")
+            }
+            Ok(JobResponse::KeyDescription { purpose: marked }) => anyhow::bail!(
+                "'{label}' is a {} key in its policy, but the token marks it as {}; provision \
+                 it with `provision`, or remove it from the policy",
+                purpose.as_str(),
+                marked.map_or("an ordinary key".to_string(), |other| format!(
+                    "a {} key",
+                    other.as_str()
+                ))
             ),
             Err(PoolError::KeyNotFound(_)) => tracing::warn!(
-                key = label,
-                "transfer key is not on the token; SignTransfer will fail until it is \
-                 provisioned"
+                key = %label,
+                "{} key is not on the token; {} will fail until it is provisioned",
+                purpose.as_str(),
+                purpose.rpc()
             ),
             Ok(other) => anyhow::bail!("unexpected response describing '{label}': {other:?}"),
-            Err(e) => anyhow::bail!("could not check transfer key '{label}': {e}"),
+            Err(e) => anyhow::bail!("could not check {} key '{label}': {e}", purpose.as_str()),
         }
     }
     Ok(())

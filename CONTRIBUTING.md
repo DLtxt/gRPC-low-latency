@@ -84,12 +84,14 @@ cd proxy && cargo fmt --check && cargo clippy --all-targets -- -D warnings && ca
 cd baseline && go vet ./... && go test ./...
 ```
 
-CI runs these plus `cargo-deny`, `gitleaks`, and three smoke tests. One drives 1,000
+CI runs these plus `cargo-deny`, `gitleaks`, and four smoke tests. One drives 1,000
 requests through the real gRPC stack. One asserts that an under-privileged identity is
-*denied*. One runs `scripts/transfer-demo.sh`, which asserts every transfer-key refusal
-as well as the approvals. The refusals are the point: a smoke test that only checked the
-happy path would not notice a control silently failing open. Run `make transfer-demo`
-locally after touching anything under `proxy/src/transfer/` or the policies.
+*denied*. Two run `scripts/transfer-demo.sh` and `scripts/release-demo.sh`, which assert
+every transfer-key and release-key refusal as well as the approvals. The refusals are
+the point: a smoke test that only checked the happy path would not notice a control
+silently failing open. Run both demos locally after touching anything under
+`proxy/src/transfer/`, `proxy/src/release/`, `proxy/src/approval.rs`, or the policies:
+the approval code is shared, so a change for one purpose can break the other.
 
 Approver private keys live in `.local/approvers/`, never in `certs/`. `certs/` is
 mounted into the proxy container, and an approval key the proxy can read is not an

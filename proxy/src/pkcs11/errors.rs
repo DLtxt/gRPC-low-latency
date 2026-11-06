@@ -2,6 +2,8 @@
 
 use cryptoki::error::{Error as CryptokiError, RvError};
 
+use super::session::Purpose;
+
 /// A failure from the pool, phrased so the gRPC layer can pick a status code without
 /// knowing anything about PKCS#11.
 #[derive(Debug, thiserror::Error)]
@@ -12,14 +14,21 @@ pub enum PoolError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
-    /// A generic `Sign` asked for a key marked transfer-only on the token.
-    #[error("key '{0}' is marked transfer-only and signs nothing but checked transfers")]
-    TransferOnly(String),
+    /// A generic `Sign` asked for a key the token marks with a purpose.
+    #[error(
+        "key '{key_label}' is marked {}-only and signs nothing but checked {}",
+        .purpose.as_str(),
+        .purpose.signs()
+    )]
+    PurposeBound { key_label: String, purpose: Purpose },
 
-    /// A transfer signature asked for a key that is not marked transfer-only: the
-    /// transfer policy and the token disagree about what the key is.
-    #[error("key '{0}' is not marked transfer-only on the token")]
-    NotTransferKey(String),
+    /// A transfer or release signature asked for a key the token does not mark with that
+    /// purpose: the policy and the token disagree about what the key is.
+    #[error("key '{key_label}' is not marked {}-only on the token", .expected.as_str())]
+    WrongPurpose {
+        key_label: String,
+        expected: Purpose,
+    },
 
     /// The bounded queue was full. Shedding here is deliberate: queueing this request
     /// would raise the tail latency of every request already accepted, which is exactly

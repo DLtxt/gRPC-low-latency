@@ -10,14 +10,17 @@ use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, AttributeType, ObjectClass};
 use cryptoki::session::Session;
 use grpc_low_latency_proxy::pkcs11::{
-    find_object, find_object_pair, is_transfer_only, open_token, TokenConfig,
+    find_object, find_object_pair, open_token, purpose_of, Purpose, TokenConfig,
 };
 use sha2::{Digest, Sha256};
 
 /// Keys that `docker/softhsm-init/init-token.sh` is contracted to provision.
 const EXPECTED_KEYPAIRS: &[&str] = &["demo-ec-p256", "demo-rsa-2048"];
 const EXPECTED_SECRET_KEYS: &[&str] = &["demo-aes-256"];
-const EXPECTED_TRANSFER_KEYS: &[&str] = &["demo-transfer-key"];
+const EXPECTED_PURPOSE_KEYS: &[(&str, Purpose)] = &[
+    ("demo-transfer-key", Purpose::Transfer),
+    ("demo-release-key", Purpose::Release),
+];
 
 fn main() -> Result<()> {
     let config = TokenConfig::from_env()?;
@@ -46,11 +49,12 @@ fn main() -> Result<()> {
         }
     }
 
-    for label in EXPECTED_TRANSFER_KEYS {
-        match check_transfer_key(&session, label) {
-            Ok(note) => println!("transfer key: {label} -> {note}"),
+    for &(label, purpose) in EXPECTED_PURPOSE_KEYS {
+        let kind = format!("{} key", purpose.as_str());
+        match check_purpose_key(&session, label, purpose) {
+            Ok(note) => println!("{kind:<12}: {label} -> {note}"),
             Err(err) => {
-                println!("transfer key: {label} -> FAILED: {err:#}");
+                println!("{kind:<12}: {label} -> FAILED: {err:#}");
                 failures.push(format!("{label}: {err:#}"));
             }
         }
@@ -90,23 +94,28 @@ fn main() -> Result<()> {
     }
 }
 
-/// Confirm a transfer key pair exists, is protected, and carries the transfer-only
-/// marker. An unmarked key under this label would make the proxy refuse transfers and
-/// leave a blind signer behind, so the marker is the point of the check.
+/// Confirm a transfer or release key pair exists, is protected, and carries its
+/// purpose's marker. An unmarked key under this label would make the proxy refuse to
+/// sign with it and leave a blind signer behind, so the marker is the point of the check.
 ///
-/// Not test-signed, unlike the other key pairs: the one thing a transfer key must never
-/// do is sign something that is not a transfer, and a health check is no exception.
-/// The transfer demo exercises it end to end instead.
-fn check_transfer_key(session: &Session, label: &str) -> Result<String> {
+/// Not test-signed, unlike the other key pairs: the one thing a purpose-bound key must
+/// never do is sign something other than its purpose, and a health check is no
+/// exception. The transfer and release demos exercise them end to end instead.
+fn check_purpose_key(session: &Session, label: &str, purpose: Purpose) -> Result<String> {
     let (private_key, _) = find_object_pair(session, label)?
         .ok_or_else(|| anyhow!("key pair not found; did softhsm-init run?"))?;
     check_protection(session, private_key)?;
-    if !is_transfer_only(session, private_key)? {
+    let marked = purpose_of(session, private_key)?;
+    if marked != Some(purpose) {
         return Err(anyhow!(
-            "private key is not marked transfer-only (CKA_ID); destroy it and provision again"
+            "private key is not marked {}-only (CKA_ID); destroy it and provision again",
+            purpose.as_str()
         ));
     }
-    Ok("sensitive, non-extractable, marked transfer-only".to_string())
+    Ok(format!(
+        "sensitive, non-extractable, marked {}-only",
+        purpose.as_str()
+    ))
 }
 
 /// Confirm a key pair exists, that the private key is properly protected, and that it

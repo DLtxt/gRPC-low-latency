@@ -382,6 +382,19 @@ blind-sign with it.
   [docs/m10-transfer-keys.md](docs/m10-transfer-keys.md), including what it leaves out:
   a compromised proxy host can still sign alone.*
 
+### M11 — Release keys (added after the original plan)
+The same pattern for a second kind of request, software releases, to show it is not
+specific to money. A release key signs only release statements the proxy builds from an
+artifact, a version, a channel and the file's SHA-256. The checks are an artifact
+allowlist, configured channels, one file per version, and an hourly cap. Every stable
+release waits for *m*-of-*n* approvers, each of whom checks their own copy of the file.
+The token marker, the approvals and the rolling windows are shared with M10 rather than
+copied.
+- **Exit:** `make release-demo` passes every step over mTLS, and CI runs it. *Met; see
+  [docs/m11-release-keys.md](docs/m11-release-keys.md), including what it leaves out: a
+  poisoned build that the approvers also receive, and a record of signed versions that
+  does not survive a restart.*
+
 ---
 
 ## 7. Benchmark protocol

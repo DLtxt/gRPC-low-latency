@@ -7,26 +7,90 @@ use cryptoki::session::{Session, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
 
-/// The `CKA_ID` that marks a key as transfer-only.
+/// The `CKA_ID` that marks a key as transfer-only (M10).
+pub const TRANSFER_ONLY_ID: &[u8] = b"gll:transfer-only";
+
+/// The `CKA_ID` that marks a key as release-only (M11).
+pub const RELEASE_ONLY_ID: &[u8] = b"gll:release-only";
+
+/// What a purpose-bound key is for, as marked on the token in its `CKA_ID`.
 ///
-/// Set when the key is provisioned (`provision::ensure_transfer_key`) and read by every
-/// path that can call `C_Sign`, which refuses to sign anything with a marked key except
-/// a transfer the proxy built itself. The restriction travels with the key rather than
-/// living only in a policy file, so no handler, proxy mode, or missing file can turn a
-/// transfer key back into a blind signer.
+/// Set when the key is provisioned (`provision::ensure_purpose_key`) and read by every
+/// path that can call `C_Sign`. A marked key signs nothing but requests of its own
+/// purpose that the proxy built itself, and the generic `Sign` is refused. The
+/// restriction travels with the key rather than living only in a policy file, so no
+/// handler, proxy mode, or missing file can turn a purpose-bound key back into a blind
+/// signer.
 ///
 /// It constrains this proxy, not the token: anyone holding the user PIN can still sign
 /// anything with any key through PKCS#11 directly.
-pub const TRANSFER_ONLY_ID: &[u8] = b"gll:transfer-only";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Purpose {
+    /// Signs transfers of value, through `SignTransfer` (M10).
+    Transfer,
+    /// Signs software releases, through `SignRelease` (M11).
+    Release,
+}
 
-/// Is this key marked transfer-only?
-pub fn is_transfer_only(session: &Session, key: ObjectHandle) -> Result<bool> {
+impl Purpose {
+    pub const ALL: [Purpose; 2] = [Purpose::Transfer, Purpose::Release];
+
+    /// The `CKA_ID` that marks a key with this purpose.
+    pub fn marker(self) -> &'static [u8] {
+        match self {
+            Purpose::Transfer => TRANSFER_ONLY_ID,
+            Purpose::Release => RELEASE_ONLY_ID,
+        }
+    }
+
+    /// `"transfer"` or `"release"`, for messages and metric labels.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Purpose::Transfer => "transfer",
+            Purpose::Release => "release",
+        }
+    }
+
+    /// What a key of this purpose signs, for messages.
+    pub fn signs(self) -> &'static str {
+        match self {
+            Purpose::Transfer => "transfers",
+            Purpose::Release => "releases",
+        }
+    }
+
+    /// The one RPC that signs with a key of this purpose.
+    pub fn rpc(self) -> &'static str {
+        match self {
+            Purpose::Transfer => "SignTransfer",
+            Purpose::Release => "SignRelease",
+        }
+    }
+
+    /// Why the generic `Sign` refuses a key of this purpose. Shared by both backends so
+    /// the refusal reads the same whichever one served it.
+    pub fn raw_sign_refusal(self, key_label: &str) -> String {
+        format!(
+            "'{key_label}' is a {} key: it signs only {} the proxy has built and checked \
+             itself, through {}",
+            self.as_str(),
+            self.signs(),
+            self.rpc()
+        )
+    }
+}
+
+/// The purpose a key is marked with, or `None` for an ordinary key.
+pub fn purpose_of(session: &Session, key: ObjectHandle) -> Result<Option<Purpose>> {
     let attributes = session
         .get_attributes(key, &[AttributeType::Id])
         .context("C_GetAttributeValue(CKA_ID) failed")?;
-    Ok(attributes.iter().any(
-        |attribute| matches!(attribute, Attribute::Id(id) if id.as_slice() == TRANSFER_ONLY_ID),
-    ))
+    Ok(attributes.iter().find_map(|attribute| match attribute {
+        Attribute::Id(id) => Purpose::ALL
+            .into_iter()
+            .find(|purpose| purpose.marker() == id.as_slice()),
+        _ => None,
+    }))
 }
 
 /// Everything needed to reach a token, read from the environment.
