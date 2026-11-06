@@ -84,10 +84,16 @@ cd proxy && cargo fmt --check && cargo clippy --all-targets -- -D warnings && ca
 cd baseline && go vet ./... && go test ./...
 ```
 
-CI runs these plus `cargo-deny`, `gitleaks`, and two smoke tests — one that drives 1,000
-requests through the real gRPC stack, and one that asserts an under-privileged identity is
-*denied*. The second matters: a smoke test that only checks the happy path would not
-notice authorization silently failing open.
+CI runs these plus `cargo-deny`, `gitleaks`, and three smoke tests. One drives 1,000
+requests through the real gRPC stack. One asserts that an under-privileged identity is
+*denied*. One runs `scripts/transfer-demo.sh`, which asserts every transfer-key refusal
+as well as the approvals. The refusals are the point: a smoke test that only checked the
+happy path would not notice a control silently failing open. Run `make transfer-demo`
+locally after touching anything under `proxy/src/transfer/` or the policies.
+
+Approver private keys live in `.local/approvers/`, never in `certs/`. `certs/` is
+mounted into the proxy container, and an approval key the proxy can read is not an
+independent approval.
 
 Never commit `certs/`, `.env`, or anything under `.local/`. All three are gitignored, and
 CI fails on tracked key material.

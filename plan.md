@@ -368,6 +368,17 @@ disclaimer, CI, screenshots, 90-second demo GIF.
 **Total: ~13–14 focused days.** Ship M0–M5 as v0.1 if time runs out; that alone is a
 credible project.
 
+### M10 — Transfer keys (added after the original plan)
+Prompted by the October 2026 Binance hot-wallet theft, where by public accounts a signing
+system signed what an attacker sent it. Keys that move value sign only transfers the
+proxy builds itself from fields it checked: a destination allowlist, per-transfer cap,
+per-minute rate, and rolling hourly budget, with *m*-of-*n* approver signatures for
+anything above a threshold or past the budget. Enforced at the token as well: the key is
+marked transfer-only, and the workers refuse to blind-sign with it.
+- **Exit:** `make transfer-demo` passes every step over mTLS, and CI runs it. *Met; see
+  [docs/m10-transfer-keys.md](docs/m10-transfer-keys.md), including what it leaves out:
+  a compromised proxy host can still sign alone.*
+
 ---
 
 ## 7. Benchmark protocol

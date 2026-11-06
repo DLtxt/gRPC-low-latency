@@ -55,6 +55,7 @@ grpcurl -cacert certs/ca.crt -cert certs/payments.crt -key certs/payments.key \
 | `make ceiling` | The token's own limit, with no gRPC in the path |
 | `make table` | Current best figures as markdown |
 | `make records` | What the last run beat or regressed against |
+| `make transfer-demo` | A hot-wallet key that signs only transfers it has checked (M10) |
 | `make clean` | Tear down, including the token volume |
 
 ---
@@ -242,14 +243,42 @@ grants = [
 ]
 ```
 
-The demo ships three identities, one deliberately under-privileged, so a real denial can
-be demonstrated rather than described.
+The demo ships four identities. One is deliberately under-privileged, so a real denial
+can be demonstrated rather than described, and one relays transfer approvals.
+
+### Transfer keys
+
+Authorization decides *who* may use a key. It does not decide *what* gets signed, so a
+compromised caller with a valid grant gets anything signed. By the public accounts, that
+is how the October 2026 Binance hot-wallet theft worked: no key was stolen, and the
+signing system signed what an attacker sent it.
+
+A **transfer key** closes that gap for keys that move value. It cannot be used with
+`Sign` at all. `SignTransfer` takes the fields of a transfer — chain, asset, destination,
+amount, nonce — and the proxy checks them against
+[`policy/transfers.toml`](policy/transfers.toml), then builds the exact bytes it signs:
+
+- **Refused:** destinations off the allowlist, amounts over the per-transfer cap, and
+  bursts over the per-minute rate.
+- **Held for *m*-of-*n* approval:** amounts over the threshold, and anything past the
+  rolling hourly budget. Approvers sign the full transfer with their own keys, which the
+  proxy never holds, and their client decodes the bytes itself rather than trusting the
+  proxy's summary.
+- **Enforced at the token too:** the key is marked transfer-only, non-modifiable and
+  non-copyable, and the workers refuse to blind-sign with it whatever the policy says.
+
+`make transfer-demo` runs it end to end and asserts every refusal.
+[`docs/m10-transfer-keys.md`](docs/m10-transfer-keys.md) has the design, the cost (about
+2–3% of throughput, plus about as much again for the audit trail), and what it does not
+cover. Above all, a compromised proxy host can still sign alone; only MPC or multisig
+removes that.
 
 ### Threat model
 
 **In scope.** A caller reaching the gRPC endpoint who should not use a given key; a
 caller with no valid certificate; a caller consuming more than their share of capacity; a
-misbehaving client trying to exhaust the service.
+misbehaving client trying to exhaust the service; a compromised caller with a valid grant
+trying to get a transfer key to sign anything but a transfer the policy allows.
 
 **Out of scope.** Anything with code execution on the proxy host — the token is in the
 proxy's address space, so that is game over by construction. Physical access. Compromise
@@ -285,7 +314,7 @@ baseline/       Go: direct-PKCS#11 baseline, deliberately naive
 proto/          hsm.v1 service definition
 scripts/        benchmark harness, cert generation, host stamping, result rendering
 deploy/         Prometheus config, provisioned Grafana dashboard
-policy/         authorization policy
+policy/         authorization and transfer policies
 results/        benchmark output (reference/ tracked, local/ ignored)
 docs/           per-milestone findings, including what did not work
 ```
@@ -299,6 +328,7 @@ docs/           per-milestone findings, including what did not work
 | [`plan.md`](plan.md) | The original design, with measured corrections in place |
 | [`docs/reference-runs.md`](docs/reference-runs.md) | ARM vs x86 comparison |
 | [`docs/m0-findings.md`](docs/m0-findings.md) … [`m8`](docs/m8-findings.md) | Per-milestone results, including measurement mistakes |
+| [`docs/m10-transfer-keys.md`](docs/m10-transfer-keys.md) | Transfer keys: policy-checked signing, quorum approvals, and their limits |
 
 The `docs/` findings carry the measurements behind each milestone: token ceilings, the
 cost of each cryptographic primitive, how the worker pool scales with core count, and the
