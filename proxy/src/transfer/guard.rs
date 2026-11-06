@@ -713,7 +713,7 @@ name = "carol"
 name = "dave"
 
 [[keys]]
-key_label = "hot"
+key_label = "transfer-key"
 approvers = ["alice", "bob", "carol"]
 quorum = 2
 hold_ttl_secs = 600
@@ -783,7 +783,8 @@ destinations = ["0xc01d", "0x5e77"]
                 amount,
                 nonce,
             };
-            self.guard.submit(requester, "hot", &request, self.at(secs))
+            self.guard
+                .submit(requester, "transfer-key", &request, self.at(secs))
         }
 
         fn held(&self, amount: &str, nonce: u64) -> HoldStatus {
@@ -803,7 +804,7 @@ destinations = ["0xc01d", "0x5e77"]
             let message = approval_message(&status.hold_id, &status.transfer.encode());
             let signature: Signature = self.signers[signer].sign(&message);
             self.guard.approve(
-                "hot",
+                "transfer-key",
                 &status.transfer.digest(),
                 &status.hold_id,
                 approver,
@@ -870,7 +871,8 @@ destinations = ["0xc01d", "0x5e77"]
             nonce: 1,
         };
         assert!(matches!(
-            f.guard.submit(&f.payments, "hot", &request, f.at(0)),
+            f.guard
+                .submit(&f.payments, "transfer-key", &request, f.at(0)),
             Err(Refusal::AssetNotAllowed { .. })
         ));
     }
@@ -933,7 +935,7 @@ destinations = ["0xc01d", "0x5e77"]
         for (name, signature) in &spent {
             f.guard
                 .approve(
-                    "hot",
+                    "transfer-key",
                     &first.transfer.digest(),
                     &first.hold_id,
                     name,
@@ -954,7 +956,7 @@ destinations = ["0xc01d", "0x5e77"]
             assert_eq!(
                 f.guard
                     .approve(
-                        "hot",
+                        "transfer-key",
                         &digest,
                         &first.hold_id,
                         name,
@@ -968,7 +970,7 @@ destinations = ["0xc01d", "0x5e77"]
             assert_eq!(
                 f.guard
                     .approve(
-                        "hot",
+                        "transfer-key",
                         &digest,
                         &second.hold_id,
                         name,
@@ -1011,7 +1013,7 @@ destinations = ["0xc01d", "0x5e77"]
         let signature: Signature = f.signers["alice"].sign(&message);
         assert!(matches!(
             f.guard.approve(
-                "hot",
+                "transfer-key",
                 &target.transfer.digest(),
                 &target.hold_id,
                 "alice",
@@ -1030,7 +1032,7 @@ destinations = ["0xc01d", "0x5e77"]
         let signature: Signature = f.signers["alice"].sign(&status.transfer.encode());
         assert!(matches!(
             f.guard.approve(
-                "hot",
+                "transfer-key",
                 &status.transfer.digest(),
                 &status.hold_id,
                 "alice",
@@ -1068,11 +1070,11 @@ destinations = ["0xc01d", "0x5e77"]
         let status = f.held("25", 1);
         assert!(f
             .guard
-            .pending("hot", &status.transfer.digest(), f.at(599))
+            .pending("transfer-key", &status.transfer.digest(), f.at(599))
             .is_ok());
         assert_eq!(
             f.guard
-                .pending("hot", &status.transfer.digest(), f.at(600))
+                .pending("transfer-key", &status.transfer.digest(), f.at(600))
                 .unwrap_err(),
             Refusal::NoSuchHold
         );
@@ -1151,7 +1153,7 @@ destinations = ["0xc01d", "0x5e77"]
         f.guard.release(reservation);
         assert!(f
             .guard
-            .pending("hot", &status.transfer.digest(), f.at(2))
+            .pending("transfer-key", &status.transfer.digest(), f.at(2))
             .unwrap()
             .approved());
     }

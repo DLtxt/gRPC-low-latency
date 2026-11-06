@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# M10 demo: a hot-wallet key that signs only transfers it has checked.
+# M10 demo: a key that signs only transfers it has checked.
 #
 # Starts its own proxy (mTLS on, fresh in-memory limits) on a spare port against the
-# native token, then plays both sides: a payments service requesting withdrawals, and
+# native token, then plays both sides: a payments service requesting transfers, and
 # treasury approvers reviewing the ones that are held. Every step asserts its outcome,
 # so this is also the CI check that the transfer path works end to end and that each
 # refusal is still a refusal.
@@ -79,8 +79,8 @@ for _ in $(seq 1 30); do
     sleep 0.5
 done
 
-KEY=demo-hot-wallet
-COLD=0xc01dc01dc01dc01dc01dc01dc01dc01dc01dc01d
+KEY=demo-transfer-key
+RESERVE=0xc01dc01dc01dc01dc01dc01dc01dc01dc01dc01d
 ATTACKER=0xbadbadbadbadbadbadbadbadbadbadbadbadbad0
 FAILED=0
 
@@ -107,7 +107,7 @@ expect() {
 sign() { expect "$1" "$2" -- --as payments sign --key "${KEY}" --chain devnet --asset ETH "${@:3}"; }
 approve() { expect "$1" "$2" -- --as treasury approve --key "${KEY}" --digest "${DIGEST}" --yes "${@:3}"; }
 
-step "1. A compromised caller asks the hot wallet to sign a digest it made up"
+step "1. A compromised caller asks the transfer key to sign a digest it made up"
 # Refused by authorization first: nothing is granted 'sign' on a transfer key. Under
 # that, the token marks the key transfer-only and the workers refuse a blind signature
 # whatever the policy says (tests/transfer.rs covers that layer directly).
@@ -139,20 +139,20 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-step "2. A small withdrawal to an allowlisted address signs at once"
-sign 0 "status +SIGNED" --to "${COLD}" --amount 1.5 --nonce 1
+step "2. A small transfer to an allowlisted account signs at once"
+sign 0 "status +SIGNED" --to "${RESERVE}" --amount 1.5 --nonce 1
 
 step "3. Any address off the allowlist is refused, whatever the amount"
 sign 1 "PermissionDenied.*not on the allowlist" --to "${ATTACKER}" --amount 0.01 --nonce 2
 
 step "4. Above the per-transfer cap is refused outright; approval cannot lift it"
-sign 1 "PermissionDenied.*per-transfer cap" --to "${COLD}" --amount 300 --nonce 3
+sign 1 "PermissionDenied.*per-transfer cap" --to "${RESERVE}" --amount 300 --nonce 3
 
-step "5. A large withdrawal is held for two approvers"
-sign 2 "PENDING_APPROVAL" --to "${COLD}" --amount 25 --nonce 4
+step "5. A large transfer is held for two approvers"
+sign 2 "PENDING_APPROVAL" --to "${RESERVE}" --amount 25 --nonce 4
 DIGEST="$(printf '%s\n' "${LAST}" | awk '$1 == "digest" { print $2 }')"
 
-step "6. The requester cannot approve its own withdrawal"
+step "6. The requester cannot approve its own transfer"
 expect 1 "PermissionDenied" -- --as payments approve --key "${KEY}" --digest "${DIGEST}" \
     --approver alice --yes
 
@@ -162,20 +162,20 @@ approve 1 "PermissionDenied.*does not verify" --approver alice \
 
 step "8. Alice approves; one approval is not a quorum"
 approve 0 "approved +as alice: 1 of 2" --approver alice
-sign 2 "approvals +1 of 2" --to "${COLD}" --amount 25 --nonce 4
+sign 2 "approvals +1 of 2" --to "${RESERVE}" --amount 25 --nonce 4
 
 step "9. Bob approves, and the requester collects the signature"
 approve 0 "quorum reached" --approver bob
-sign 0 "approvals +2 of 2 required" --to "${COLD}" --amount 25 --nonce 4
+sign 0 "approvals +2 of 2 required" --to "${RESERVE}" --amount 25 --nonce 4
 
-step "10. Approvals are spent: the same withdrawal again starts from zero"
-sign 2 "approvals +0 of 2" --to "${COLD}" --amount 25 --nonce 4
+step "10. Approvals are spent: the same transfer again starts from zero"
+sign 2 "approvals +0 of 2" --to "${RESERVE}" --amount 25 --nonce 4
 
-step "11. Small withdrawals that add up are held once the hour's budget would pass"
+step "11. Small transfers that add up are held once the hour's budget would pass"
 # 1.5 + 25 have been signed this hour; the auto-sign budget is 50 ETH.
-sign 0 "status +SIGNED" --to "${COLD}" --amount 9 --nonce 5
-sign 0 "status +SIGNED" --to "${COLD}" --amount 9 --nonce 6
-sign 2 "auto-sign budget" --to "${COLD}" --amount 9 --nonce 7
+sign 0 "status +SIGNED" --to "${RESERVE}" --amount 9 --nonce 5
+sign 0 "status +SIGNED" --to "${RESERVE}" --amount 9 --nonce 6
+sign 2 "auto-sign budget" --to "${RESERVE}" --amount 9 --nonce 7
 
 step "12. What the proxy recorded"
 sleep 1.2 # the outflow gauge is sampled once a second

@@ -36,8 +36,8 @@ name = "carol"
 description = "Security on-call"
 
 [[keys]]
-key_label = "demo-hot-wallet"
-description = "Hot wallet. Withdrawals to the cold wallet and the settlement account only."
+key_label = "demo-transfer-key"
+description = "Demo transfer key. Pays out to two fixed accounts only: reserve and settlement."
 approvers = ["alice", "bob", "carol"]
 quorum = 2
 # Long enough for two people to look; short enough that a held transfer nobody wanted
@@ -54,7 +54,7 @@ max_per_transfer = "250"
 approval_above = "10"
 auto_sign_per_hour = "50"
 destinations = [
-    "0xc01dc01dc01dc01dc01dc01dc01dc01dc01dc01d", # cold wallet
+    "0xc01dc01dc01dc01dc01dc01dc01dc01dc01dc01d", # reserve account
     "0x5e775e775e775e775e775e775e775e775e775e77", # settlement account
 ]
 

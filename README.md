@@ -55,7 +55,7 @@ grpcurl -cacert certs/ca.crt -cert certs/payments.crt -key certs/payments.key \
 | `make ceiling` | The token's own limit, with no gRPC in the path |
 | `make table` | Current best figures as markdown |
 | `make records` | What the last run beat or regressed against |
-| `make transfer-demo` | A hot-wallet key that signs only transfers it has checked (M10) |
+| `make transfer-demo` | A key that signs only transfers it has checked, end to end (M10) |
 | `make clean` | Tear down, including the token volume |
 
 ---
@@ -246,17 +246,21 @@ grants = [
 The demo ships four identities. One is deliberately under-privileged, so a real denial
 can be demonstrated rather than described, and one relays transfer approvals.
 
-### Transfer keys
+### Signing what the proxy has read
 
-Authorization decides *who* may use a key. It does not decide *what* gets signed, so a
-compromised caller with a valid grant gets anything signed. By the public accounts, that
-is how the October 2026 Binance hot-wallet theft worked: no key was stolen, and the
-signing system signed what an attacker sent it.
+`Sign` signs opaque bytes. Authorization decides *who* may use a key, but not *what*
+gets signed. So for keys whose signatures carry meaning — moving money, releasing
+software, issuing certificates — a compromised caller with a valid grant can get
+anything signed. The fix has the same shape for all of them. The caller describes the
+request in fields. The proxy checks the fields against policy, builds the exact bytes
+itself, and holds risky requests for people to approve.
 
-A **transfer key** closes that gap for keys that move value. It cannot be used with
-`Sign` at all. `SignTransfer` takes the fields of a transfer — chain, asset, destination,
-amount, nonce — and the proxy checks them against
-[`policy/transfers.toml`](policy/transfers.toml), then builds the exact bytes it signs:
+M10 builds this for one kind of request, a transfer of value, prompted by the October
+2026 Binance incident. By the public accounts, an exchange's signer signed what an
+attacker sent it. A **transfer key** cannot be used with `Sign` at all. `SignTransfer`
+takes the fields of a transfer — chain, asset, destination, amount, nonce — and the
+proxy checks them against [`policy/transfers.toml`](policy/transfers.toml), then builds
+the exact bytes it signs:
 
 - **Refused:** destinations off the allowlist, amounts over the per-transfer cap, and
   bursts over the per-minute rate.
@@ -267,6 +271,7 @@ amount, nonce — and the proxy checks them against
 - **Enforced at the token too:** the key is marked transfer-only, non-modifiable and
   non-copyable, and the workers refuse to blind-sign with it whatever the policy says.
 
+The proxy is still only a signer: it holds no balances and talks to no blockchain.
 `make transfer-demo` runs it end to end and asserts every refusal.
 [`docs/m10-transfer-keys.md`](docs/m10-transfer-keys.md) has the design, the cost (about
 2–3% of throughput, plus about as much again for the audit trail), and what it does not
@@ -328,7 +333,7 @@ docs/           per-milestone findings, including what did not work
 | [`plan.md`](plan.md) | The original design, with measured corrections in place |
 | [`docs/reference-runs.md`](docs/reference-runs.md) | ARM vs x86 comparison |
 | [`docs/m0-findings.md`](docs/m0-findings.md) … [`m8`](docs/m8-findings.md) | Per-milestone results, including measurement mistakes |
-| [`docs/m10-transfer-keys.md`](docs/m10-transfer-keys.md) | Transfer keys: policy-checked signing, quorum approvals, and their limits |
+| [`docs/m10-transfer-keys.md`](docs/m10-transfer-keys.md) | Signing what the proxy has read: transfer keys, quorum approvals, and their limits |
 
 The `docs/` findings carry the measurements behind each milestone: token ceilings, the
 cost of each cryptographic primitive, how the worker pool scales with core count, and the

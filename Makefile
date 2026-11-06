@@ -17,7 +17,7 @@ env: ## Generate .env with random PINs (idempotent)
 certs: ## Generate the local CA, server cert, per-workload client certs, and approver keys
 	@./scripts/gen-certs.sh
 
-transfer-demo: env certs ## M10: a hot-wallet key that signs only checked transfers, end to end
+transfer-demo: env certs ## M10: a key that signs only transfers it has checked, end to end
 	@./scripts/transfer-demo.sh
 
 up: env certs ## Provision the token and start the full stack (detached)

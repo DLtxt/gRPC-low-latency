@@ -369,12 +369,15 @@ disclaimer, CI, screenshots, 90-second demo GIF.
 credible project.
 
 ### M10 — Transfer keys (added after the original plan)
-Prompted by the October 2026 Binance hot-wallet theft, where by public accounts a signing
-system signed what an attacker sent it. Keys that move value sign only transfers the
-proxy builds itself from fields it checked: a destination allowlist, per-transfer cap,
-per-minute rate, and rolling hourly budget, with *m*-of-*n* approver signatures for
-anything above a threshold or past the budget. Enforced at the token as well: the key is
-marked transfer-only, and the workers refuse to blind-sign with it.
+Keys whose signatures carry meaning should sign only requests the proxy can read and
+check, not opaque bytes. M10 builds that for one kind of request, a transfer of value,
+prompted by the October 2026 Binance incident, where by public accounts an exchange's
+signer signed what an attacker sent it. A transfer key signs only transfers the proxy
+builds itself from fields it checked. The checks are a destination allowlist, a
+per-transfer cap, a per-minute rate, and a rolling hourly budget, with *m*-of-*n*
+approver signatures for anything above a threshold or past the budget. They are enforced
+at the token as well: the key is marked transfer-only, and the workers refuse to
+blind-sign with it.
 - **Exit:** `make transfer-demo` passes every step over mTLS, and CI runs it. *Met; see
   [docs/m10-transfer-keys.md](docs/m10-transfer-keys.md), including what it leaves out:
   a compromised proxy host can still sign alone.*

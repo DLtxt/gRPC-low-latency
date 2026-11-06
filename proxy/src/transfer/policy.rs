@@ -370,7 +370,7 @@ name = "bob"
 name = "carol"
 
 [[keys]]
-key_label = "hot"
+key_label = "transfer-key"
 approvers = ["alice", "bob", "carol"]
 quorum = 2
 max_transfers_per_minute = 30
@@ -393,7 +393,7 @@ destinations = ["0xc01d", "0x5e77"]
         let transfers = TransferPolicy::load(root.join("policy/transfers.toml")).unwrap();
         let authz = AuthzPolicy::load(root.join("policy/authz.toml")).unwrap();
         transfers.check_grants(&authz).unwrap();
-        assert!(transfers.is_transfer_key("demo-hot-wallet"));
+        assert!(transfers.is_transfer_key("demo-transfer-key"));
     }
 
     fn with(replace: &str, by: &str) -> String {
@@ -411,7 +411,11 @@ destinations = ["0xc01d", "0x5e77"]
     #[test]
     fn compiles_amounts_into_smallest_units() {
         let policy = TransferPolicy::parse(SAMPLE).unwrap();
-        let eth = policy.key("hot").unwrap().asset("devnet", "ETH").unwrap();
+        let eth = policy
+            .key("transfer-key")
+            .unwrap()
+            .asset("devnet", "ETH")
+            .unwrap();
         assert_eq!(eth.max_per_transfer, 100 * 10u128.pow(18));
         assert_eq!(eth.approval_above, 10 * 10u128.pow(18));
         assert!(eth.allows_destination("0xc01d"));
@@ -421,7 +425,7 @@ destinations = ["0xc01d", "0x5e77"]
     #[test]
     fn unlisted_keys_are_not_transfer_keys() {
         let policy = TransferPolicy::parse(SAMPLE).unwrap();
-        assert!(policy.is_transfer_key("hot"));
+        assert!(policy.is_transfer_key("transfer-key"));
         assert!(!policy.is_transfer_key("demo-ec-p256"));
     }
 
@@ -482,11 +486,11 @@ destinations = ["0xc01d", "0x5e77"]
     const AUTHZ: &str = r#"
 [[workloads]]
 identity = "payments"
-grants = [{ key_label = "hot", operations = ["sign_transfer", "verify"] }]
+grants = [{ key_label = "transfer-key", operations = ["sign_transfer", "verify"] }]
 
 [[workloads]]
 identity = "treasury"
-grants = [{ key_label = "hot", operations = ["approve_transfer"] }]
+grants = [{ key_label = "transfer-key", operations = ["approve_transfer"] }]
 "#;
 
     fn check(authz: &str) -> Result<()> {

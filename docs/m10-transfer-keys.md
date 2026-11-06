@@ -1,24 +1,52 @@
 # M10 — transfer keys: signing what the proxy has read
 
-Status: **built and demonstrated.** `make transfer-demo` runs a hot-wallet key end to end
+Status: **built and demonstrated.** `make transfer-demo` runs a transfer key end to end
 over mTLS against a real SoftHSM token, and asserts 16 outcomes. CI runs it on every
-pull request. This milestone was added after the original plan, in response to the
-October 2026 Binance hot-wallet theft.
+pull request. This milestone was added after the original plan.
 
-## The gap
+## The pattern
 
-By the public accounts at the time of writing, no private key was extracted in the
-Binance incident. The signing system signed what an attacker sent it, including EIP-7702
-delegations that no withdrawal flow should ever produce. The key was protected and its
-*use* was not.
+Every other key here signs opaque bytes. Authorization decides *who* may use a key, but
+the proxy cannot tell what it is signing, so a compromised caller with a valid grant can
+get anything signed. For most keys that is the right trade: the proxy is fast precisely
+because it does not care what the bytes mean. For keys whose signatures carry meaning, it
+makes the proxy a signing oracle:
 
-This proxy had the same gap. `Sign` signs whatever bytes an authorized caller sends:
-authorization decides *who* may use a key, and nothing decides *what* gets signed. A
-compromised `payments` service holds a valid certificate and a valid grant, so it is a
-signing oracle. The HSM guarantees the key cannot leave. It does not guarantee the key
-is only used for what it is for.
+| A signature that… | What a blind signer would sign for an attacker |
+|---|---|
+| moves money | a payment to the attacker's account |
+| releases software | the attacker's build, as a trusted release |
+| issues a certificate | a certificate for a domain the attacker does not control |
 
-## What was built, against the four usual recommendations
+The fix has the same shape in each case. The caller describes the request in fields,
+not bytes. The signer checks the fields against a policy, builds the exact bytes it
+signs, and holds the risky requests until enough people approve them. The checks live
+beside the key, so compromising a caller does not get around them. A check upstream of a
+signer that trusts its callers stops nothing once that upstream service falls.
+
+M10 builds this for one kind of request: a transfer of value. Some parts do not depend
+on the request type and would carry over to another: the transfer-only marker on the
+token, the workers' refusal to blind-sign, approver keys, and the approval check. The
+encoding, the policy, and the limits are specific to transfers.
+
+None of this makes the proxy a wallet. It holds no balances, talks to no blockchain, and
+sends nothing anywhere. It signs, and whatever moves the value sits in front of it.
+
+## Why transfers first
+
+Because of the October 2026 Binance incident. An exchange keeps most of its funds in
+cold wallets, whose keys are offline, and a working float in hot wallets, whose keys
+stay online so that withdrawals can be signed automatically. By the public accounts at
+the time of writing, no private key was extracted. The signer behind the hot wallet
+signed what an attacker sent it, including EIP-7702 delegations that no withdrawal flow
+should ever produce. The key was protected and its *use* was not.
+
+That signer is this kind of proxy, and this proxy had the same gap. A compromised
+`payments` service holds a valid certificate and a valid grant, so to the generic `Sign`
+it is indistinguishable from the real thing. The HSM guarantees the key cannot leave. It
+does not guarantee the key is only used for what it is for.
+
+## Against the four usual recommendations
 
 | Recommendation | Here |
 |---|---|
@@ -109,7 +137,7 @@ Some decisions behind those rules:
   the next one.
 - **The rate limit is not lifted by approvals.** It bounds how fast the key can move
   value even with people in the loop, which is what turns a compromise into an incident
-  rather than an emptied wallet.
+  rather than an emptied account.
 - **Check and reserve happen under one lock.** Two concurrent requests cannot both fit
   under the budget's last remaining room. The signature itself is made outside the lock.
   If it fails, the reservation is released, and an approved hold goes back with its
@@ -149,7 +177,7 @@ Some decisions behind those rules:
 
 ## What it costs
 
-`Sign` with a digest on `demo-ec-p256` against `SignTransfer` on `demo-hot-wallet`, both
+`Sign` with a digest on `demo-ec-p256` against `SignTransfer` on the demo transfer key, both
 over mTLS, pool with 4 workers, concurrency 8, 8,000 requests per run, 7 interleaved
 rounds. Limits were raised so they would not throttle the load. Measured on a local
 Apple M2 with background load, so reported only as ratios, per the benchmarking policy.
@@ -183,10 +211,10 @@ figures; a reference run would be needed to publish absolute numbers.
 - **The policy file is a trust root.** Whoever can edit `policy/transfers.toml` can add a
   destination or raise a limit, so it belongs under the same review as code. It is read
   at startup only.
-- **Allowlists fit treasury flows, not customer withdrawals.** Moving funds from hot to
-  cold wallets, or to a settlement account, suits a fixed list. Arbitrary customer
-  withdrawals need different controls: per-customer limits, address screening, and delay
-  windows.
+- **Allowlists fit transfers between known accounts, not arbitrary payouts.** Moving
+  funds to a reserve or a settlement account suits a fixed list. Paying out to addresses
+  that customers supply needs different controls: per-customer limits, address
+  screening, and delay windows.
 - **It is not a real chain's format.** A deployment would build, for example, an
   EIP-1559 transaction from the checked fields, and refuse every other transaction type,
   EIP-7702 authorizations included. The property that matters, that the signer builds the
@@ -212,9 +240,9 @@ the audit log.
 
 | Step | Expected |
 |---|---|
-| a made-up digest sent to `Sign` on the hot wallet | `PERMISSION_DENIED` |
+| a made-up digest sent to `Sign` on the transfer key | `PERMISSION_DENIED` |
 | proxy started with a policy granting `sign` on it | refuses to start |
-| 1.5 ETH to the cold wallet | signed, and verified locally over the decoded bytes |
+| 1.5 ETH to the reserve account | signed, and verified locally over the decoded bytes |
 | 0.01 ETH to an unlisted address | refused: not on the allowlist |
 | 300 ETH | refused: over the 250 ETH cap |
 | 25 ETH | held: above the 10 ETH threshold |
@@ -229,9 +257,9 @@ Against the compose stack, which loads the same policy, use the CLI directly:
 
 ```bash
 T=proxy/target/release/transfer
-$T --as payments sign --key demo-hot-wallet --chain devnet --asset ETH \
+$T --as payments sign --key demo-transfer-key --chain devnet --asset ETH \
    --to 0xc01dc01dc01dc01dc01dc01dc01dc01dc01dc01d --amount 25 --nonce 1
-$T --as treasury approve --key demo-hot-wallet --digest <digest> --approver alice
+$T --as treasury approve --key demo-transfer-key --digest <digest> --approver alice
 ```
 
 Without `--yes`, `approve` shows the decoded transfer and waits for the approver to type

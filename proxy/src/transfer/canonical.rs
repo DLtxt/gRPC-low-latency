@@ -466,7 +466,7 @@ mod tests {
 
     fn sample() -> Transfer {
         Transfer::new(
-            "demo-hot-wallet",
+            "demo-transfer-key",
             "devnet",
             "ETH",
             18,
@@ -491,7 +491,7 @@ mod tests {
     fn encoding_is_stable() {
         assert_eq!(
             to_hex(&sample().digest()),
-            "58eadb923bb4aeb01a4bb294c18395b849216b02813de3a29ee5c5a6e4342740"
+            "1b5892b46531a51ac1f41e03425afd0237dfb4e12b535c7377a90fec82c68c58"
         );
     }
 

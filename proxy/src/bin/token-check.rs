@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 /// Keys that `docker/softhsm-init/init-token.sh` is contracted to provision.
 const EXPECTED_KEYPAIRS: &[&str] = &["demo-ec-p256", "demo-rsa-2048"];
 const EXPECTED_SECRET_KEYS: &[&str] = &["demo-aes-256"];
-const EXPECTED_TRANSFER_KEYS: &[&str] = &["demo-hot-wallet"];
+const EXPECTED_TRANSFER_KEYS: &[&str] = &["demo-transfer-key"];
 
 fn main() -> Result<()> {
     let config = TokenConfig::from_env()?;

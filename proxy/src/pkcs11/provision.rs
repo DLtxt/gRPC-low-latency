@@ -22,7 +22,7 @@ pub const DEMO_EC_KEY: &str = "demo-ec-p256";
 pub const DEMO_RSA_KEY: &str = "demo-rsa-2048";
 pub const DEMO_AES_KEY: &str = "demo-aes-256";
 /// A transfer key (M10): signs only transfers, through `SignTransfer`.
-pub const DEMO_TRANSFER_KEY: &str = "demo-hot-wallet";
+pub const DEMO_TRANSFER_KEY: &str = "demo-transfer-key";
 
 /// Whether a key had to be created or was already there.
 #[derive(Debug, PartialEq, Eq)]

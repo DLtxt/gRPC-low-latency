@@ -205,8 +205,8 @@ async fn provisioning_is_idempotent_and_refuses_an_unmarked_key() {
 
     // An ordinary key under the label a transfer key should have. Reporting it as
     // present would leave a blind signer where the policy expects a transfer key.
-    ensure_ec_key(&session, "imposter-wallet").unwrap();
-    let error = ensure_transfer_key(&session, "imposter-wallet").unwrap_err();
+    ensure_ec_key(&session, "unmarked-transfer-key").unwrap();
+    let error = ensure_transfer_key(&session, "unmarked-transfer-key").unwrap_err();
     assert!(
         format!("{error:#}").contains("not marked transfer-only"),
         "{error:#}"
